@@ -2,6 +2,8 @@
 
 This is a public implementation of a poker client and server, in pyQt5, playing Bordeaux3 poker variant
 
+![Poker software screenshot](https://raw.githubusercontent.com/arthur-hav/QtB3Poker/main/images/showdown.PNG)
+
 ## Dependencies
 
 ### Client
