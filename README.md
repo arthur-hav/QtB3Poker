@@ -38,5 +38,5 @@ Running under supervisor is advised.
 
 1. Browse issues to see if your idea is already in the roadmap.
 2. If it is, interact with it by commenting or upvoting what you would support.
-3. If not, create one, I welcomly discuss all kind of innovative changes.
+3. If not, create one, I welcome and openly discuss all kind of innovative changes.
 4. Then, submit a pull request with the changes associated to the issue. I will review it and integrate it; do not be shy as I welcome just about anything that completes an open issue without breaking stuff.
