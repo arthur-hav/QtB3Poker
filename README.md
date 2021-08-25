@@ -37,12 +37,12 @@ Running under supervisor is advised.
 ## Contributing
 
 1. Browse issues to see if your idea is already in the roadmap.
-2. If it is, interact with it by commenting or upvoting what you would support. I use issues as mental notes
+2. If it is, interact with it by commenting or upvoting what you would support.
 3. If not, create one, I welcome and openly discuss all kind of innovative changes.
 
 Do these steps whether you intend to submit changes or request them.
 
 Additionally, if you intend to code yourself:
 
-1. If you know how to code but are stuck on implementing a given issue, request for additional specification in the issue and I will provide help.
+1. If you know how to code but are stuck on implementing a given issue, request for additional specification in the issue and I will provide help. The code and issues I open are commented with the bare minimum.
 2. Then, submit a pull request with the changes associated to the issue. I will review it and integrate it; do not be shy as I welcome just about anything that completes an open issue without breaking stuff.
