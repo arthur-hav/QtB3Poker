@@ -15,6 +15,9 @@ pip install pyinstaller
 python -m PyInstaller -F client.py
 ```
 
+AVOID building with a different arch python than your system arch. Such as Pycharm venv python. 
+This is the primary problem of detecting the binary as malicious by antivirus sofware such as Windows defender.
+
 Resulting exe is under `./dest`. The executable will need the assets
 under the images and sounds directories.
 
