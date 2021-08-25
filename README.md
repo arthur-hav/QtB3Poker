@@ -48,3 +48,7 @@ Additionally, if you intend to provide code:
 
 1. If you know how to code but are stuck on implementing a given issue, request for additional specification in the issue and I will provide help. The code and issues I open are commented with the bare minimum.
 2. Then, submit a pull request with the changes associated to the issue. I will review it and integrate it; do not be shy as I welcome just about anything that completes an open issue without breaking stuff.
+
+### Code standards
+
+Code that works
