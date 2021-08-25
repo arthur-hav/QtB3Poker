@@ -15,7 +15,8 @@ pip install pyinstaller
 python -m PyInstaller -F client.py
 ```
 
-Resulting exe is under `./dest`.
+Resulting exe is under `./dest`. The executable will need the assets
+under the images and sounds directories.
 
 ### Server
 
