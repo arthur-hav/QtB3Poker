@@ -1,0 +1,4 @@
+use_ssl: True
+pem_chain: '/etc/letsencrypt/live/poker.vdust.net/fullchain.pem'
+pem_privkey: '/etc/letsencrypt/live/poker.vdust.net/privkey.pem'
+listen_address: ''

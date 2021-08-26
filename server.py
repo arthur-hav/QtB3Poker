@@ -17,6 +17,7 @@ import datetime
 import re
 import ssl
 from collections import defaultdict
+import yaml
 
 
 def urand():
@@ -25,7 +26,6 @@ def urand():
 
 HOST = '127.0.0.1'  # Standard loopback interface address (localhost)
 PORT = 33344        # Port to listen on (non-privileged ports are > 1023)
-use_ssl = True
 
 
 class Deck:
@@ -79,7 +79,7 @@ class Player:
             return
         self.amount_bet = gamehand.max_amount_bet
 
-    def send_state(self, json_dict):
+    def send_message(self, message):
         pass
 
 
@@ -102,7 +102,7 @@ class Human(Player):
                         self.disconnected = True
                     else:
                         self.action_queue.put(action)
-                except (ConnectionError, OSError):
+                except (ConnectionError, OSError, ssl.SSLError):
                     self.action_queue.put('f')
                     self.disconnected = True
 
@@ -139,10 +139,10 @@ class Human(Player):
                                                                 'player': self.nick})
             gamehand.last_action = 'fold'
 
-    def send_state(self, json_dict):
+    def send_message(self, json_dict):
         try:
-            self.conn.send(bytes(json.dumps(json_dict) + '\n', encoding='utf-8'))
-        except ConnectionError:
+            self.conn.send(json.dumps(json_dict).encode("utf-8") + '\n', encoding='utf-8')
+        except (OSError, ConnectionError, ssl.SSLError):
             self.disconnected = True
 
 
@@ -386,7 +386,7 @@ class Game:
         start = {'start': True, 'players': [p.nick for p in players]}
         for p in players:
             p.chips = server_config.get('start_chips', 500)
-            p.conn.send(bytes(json.dumps(start)+'\n', encoding='utf-8'))
+            p.send_message(start)
 
         self.start_time = datetime.datetime.utcnow()
         self.players = players
@@ -403,8 +403,8 @@ class Game:
             for p in self.players:
                 if p not in new_players:
                     if not p.disconnected:
-                        p.conn.send(bytes(json.dumps({'finished': place}) + '\n', encoding='utf-8'))
-                        self.observers.append(p)
+                        p.send_message({'finished': place})
+                    self.observers.append(p)
                     self.mongo_db.tourneys.update_one({'_id': self.tourney_id},
                                                       {'$set': {f'placements.{p.nick}': place}})
         self.players = new_players
@@ -427,9 +427,9 @@ class Game:
                     player.chips = player.chips - decrease
                     if not player.disconnected:
                         message = 'Tournament chips decrease.'
-                        player.conn.send(bytes(json.dumps({'log': message}) + '\n', encoding='utf-8'))
+                        player.send_message({'log': message})
                         message = f'You were removed {decrease} chips'
-                        player.conn.send(bytes(json.dumps({'log': message}) + '\n', encoding='utf-8'))
+                        player.send_message({'log': message})
             self.check_eliminated()
             hand = GameHand(self.players, self.observers, deck, self.mongo_db, self.tourney_id)
             if len(self.players) <= 1:
@@ -486,14 +486,14 @@ class Game:
 
 
 def main():
+    config = yaml.load("server-conf.yml")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        if use_ssl:
+        if config["use_ssl"]:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain('/etc/letsencrypt/live/poker.vdust.net/fullchain.pem',
-                                    '/etc/letsencrypt/live/poker.vdust.net/privkey.pem')
-        s.bind(('', PORT))
+            context.load_cert_chain(config["pem_chain"], config["pem_privkey"])
+        s.bind((config["listen_address"], PORT))
         s.listen()
-        if use_ssl:
+        if config["use_ssl"]:
             ssock = context.wrap_socket(s, server_side=True)
         else:
             ssock = s
@@ -514,8 +514,10 @@ def main():
                 room = mess['room_code']
                 if 'config' in mess and room not in confs:
                     confs[room] = mess['config']
-            except (json.JSONDecodeError, KeyError):
-                print('TUTU')
+                if not confs[room]:
+                    conn.close()
+                    continue
+            except (json.JSONDecodeError, KeyError, ssl.SSLError):
                 conn.close()
                 continue
             p = Human(nick, conn)
@@ -523,8 +525,7 @@ def main():
             listener.start()
             rooms[room].append(p)
             rooms[room] = [p for p in rooms[room] if not p.disconnected]
-            print((rooms[room]))
-            if len(rooms[room]) >= confs[room].get('number_seats'):
+            if len(rooms[room]) >= confs[room]['number_seats']:
                 g = Game(rooms[room], confs[room])
                 t = mp.Thread(target=g.run)
                 t.start()

@@ -7,6 +7,8 @@ from tutorial import Tutorial
 import time
 import ssl
 import random
+import yaml
+
 
 sentry_sdk.init(
     "https://bcdfdee5d8864d408aae8249eff6edc5@o968644.ingest.sentry.io/5919963",
@@ -255,8 +257,7 @@ class TopConnectWindow(QWidget):
         self.ip_text = QLineEdit()
         self.ip_text.setText('localhost')
         layout.addRow(QLabel("Server name"), self.ip_text)
-        self.use_ssl = QCheckBox()
-        layout.addRow(QLabel('Use SSL'), self.use_ssl)
+
 
 class BetAmountWidget(QWidget):
     def __init__(self, nb_cols=2):
@@ -653,8 +654,9 @@ class PokerTableWidget(QDialog):
 
 class MainWindow(QMainWindow):
 
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
         self.setWindowTitle('Bordeaux 3')
         self._init_connect()
         self.adjustSize()
@@ -697,7 +699,7 @@ class MainWindow(QMainWindow):
         self.net_listener = method(self.connect_window.top_window.ip_text.text(),
                                                slug_nickname,
                                                room_code,
-                                               self.connect_window.top_window.use_ssl.checkState(),
+                                               self.config["use_ssl"],
                                                **kwargs)
         self.net_listener.moveToThread(self.listener_thread)
         self.listener_thread.run = self.net_listener.run_connect
@@ -767,7 +769,8 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication([])
-    mw = MainWindow()
+    config = yaml.load(open("client-conf.yaml"))
+    mw = MainWindow(config)
     mw.show()
     app.exec_()
 
