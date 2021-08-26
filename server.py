@@ -137,7 +137,7 @@ class Human(Player):
 
     def send_message(self, json_dict):
         try:
-            self.conn.send((json.dumps(json_dict) + "\n").encode("utf-8"), encoding='utf-8')
+            self.conn.send((json.dumps(json_dict) + "\n").encode("utf-8"))
         except (OSError, ConnectionError, ssl.SSLError):
             self.disconnected = True
 
@@ -335,7 +335,6 @@ class GameHand:
                 self.hand_document['winnings'][p.nick] -= p.amount_bet
             winner.chips += self.calc_pot()[0]
             if len(self.players) == 2 and not self.flop1:
-                print('rev back!')
                 self.players.reverse()
             self.hand_document['winnings'][winner.nick] += self.calc_pot()[0]
             self.mongo_db.insert_one(self.hand_document)
@@ -477,7 +476,7 @@ class Game:
             if next_hand:
                 continue
             hand.showdown()
-            time.sleep(3)
+            time.sleep(5)
             self.check_eliminated()
 
 

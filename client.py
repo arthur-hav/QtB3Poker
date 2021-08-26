@@ -443,12 +443,14 @@ class RaiseWidgetGroup(QWidget):
         self.free_text.setGeometry(30, 180, 40, 20)
         int_validator = QIntValidator()
         self.free_text.setValidator(int_validator)
-        self.free_text.editingFinished.connect(self.set_raise_amount)
+        self.free_text.textEdited.connect(self.set_raise_amount)
         self.slider.setMaximum(130)
         self.slider.setSingleStep(1)
         self.slider.setPageStep(1)
 
     def set_raise_amount(self):
+        if not self.free_text.hasAcceptableInput():
+            return
         amount = int(self.free_text.text())
         self.raise_size = amount
         self.raise_change.emit(self.raise_size)
@@ -466,7 +468,6 @@ class RaiseWidgetGroup(QWidget):
                     v = i
                     break
         self.slider.setValue(max(v - 2, 0))
-        self.free_text.clearFocus()
 
     def set_raise_range(self, min_raise, max_raise):
         self.min_raise = min_raise
@@ -666,10 +667,17 @@ class Game(QObject):
         super().__init__()
         self.nickname = nickname
         self.poker_table = None
+        self.starter_thread = QThread()
         self.listener_thread = QThread()
         self.room_tab = room_tab
         self.server = ip_text, port
         self.use_ssl = use_ssl
+        self.timer_mutex = QMutex()
+        self.poker_timer = PokerTimer()
+        self.poker_timer_thread = QThread()
+        self.poker_timer.moveToThread(self.poker_timer_thread)
+        self.poker_timer_thread.started.connect(self.poker_timer.run)
+        self.poker_timer.timer_sig.connect(self.decrease_timer)
 
     def host_connect(self):
         server_config = {'start_chips': int(self.room_tab.start_chips.text()),
@@ -689,13 +697,12 @@ class Game(QObject):
                                    room_code,
                                    self.use_ssl,
                                    **kwargs)
-        self.net_listener.moveToThread(self.listener_thread)
-        self.listener_thread.started.connect(self.net_listener.run_connect)
+        self.net_listener.moveToThread(self.starter_thread)
+        self.starter_thread.started.connect(self.net_listener.run_connect)
         self.net_listener.pkr_connect.connect(self.on_connect)
         self.net_listener.pkr_connect.connect(self.net_listener.run_start)
-        self.net_listener.pkr_start.connect(self.net_listener.run_main)
-
-        self.listener_thread.start()
+        self.net_listener.pkr_start.connect(self.on_start)
+        self.starter_thread.start()
 
     def on_connect(self, nickname):
         self.poker_table = PokerTableWidget(nickname)
@@ -716,14 +723,11 @@ class Game(QObject):
 
     def on_start(self, startstate):
         self.poker_table.setStart(startstate)
-        self.net_listener.gamestate.connect(self.on_recv)
-        self.timer_mutex = QMutex()
-        self.poker_timer = PokerTimer()
-        self.poker_timer_thread = QThread()
-        self.poker_timer.moveToThread(self.poker_timer_thread)
-        self.poker_timer_thread.started.connect(self.poker_timer.run)
-        self.poker_timer.timer_sig.connect(self.decrease_timer)
         self.poker_timer_thread.start()
+        self.net_listener.moveToThread(self.listener_thread)
+        self.net_listener.gamestate.connect(self.on_recv)
+        self.listener_thread.started.connect(self.net_listener.run_main)
+        self.listener_thread.start()
 
     def decrease_timer(self):
         for player in self.poker_table.players:
@@ -793,7 +797,6 @@ class MainWindow(QMainWindow):
                  self.config["use_ssl"],
                  self.connect_window.connect_room_tab,
                  )
-        print(self.games)
         self.games[key].guest_connect()
 
     def host_connect(self):
@@ -804,7 +807,6 @@ class MainWindow(QMainWindow):
                  self.config["use_ssl"],
                  self.connect_window.host_room_tab,
                  )
-        print(self.games)
         self.games[key].host_connect()
 
 
