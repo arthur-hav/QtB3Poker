@@ -2,3 +2,9 @@ use_ssl: True
 nickname: "Your nickname"
 server: "localhost"
 server_port: 33344
+room_host_defaults:
+  start_chips: 500
+  blind_timer: 120
+  blind_percent: 5.0
+  skim_percent: 2.0
+  number_seats: 3

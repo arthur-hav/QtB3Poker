@@ -192,7 +192,7 @@ class ConnectRoomTab(QWidget):
 class HostRoomTab(QWidget):
     code_range = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
-    def __init__(self):
+    def __init__(self, host_defaults):
         super().__init__()
         layout = QFormLayout()
         self.setLayout(layout)
@@ -201,27 +201,27 @@ class HostRoomTab(QWidget):
         self.room_code.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         layout.addRow(self.room_code_label, self.room_code)
 
-        self.start_chips = QLineEdit('500')
+        self.start_chips = QLineEdit(str(host_defaults["start_chips"]))
         start_chips_validator = QIntValidator(100, 5000)
         self.start_chips.setValidator(start_chips_validator)
         layout.addRow(QLabel("Starting chips:"), self.start_chips)
 
-        self.blind_timer = QLineEdit('90')
+        self.blind_timer = QLineEdit(str(host_defaults["blind_timer"]))
         blind_timer_validator = QIntValidator(30, 3600)
         self.blind_timer.setValidator(blind_timer_validator)
         layout.addRow(QLabel("Blind timer (s):"), self.blind_timer)
 
-        self.blind_percent = QLineEdit('4.0')
+        self.blind_percent = QLineEdit(str(host_defaults["blind_percent"]))
         blind_percent_validator = QDoubleValidator(0, 50, 1)
         self.blind_percent.setValidator(blind_percent_validator)
         layout.addRow(QLabel("Blind increase %:"), self.blind_percent)
 
-        self.skim_percent = QLineEdit('2.0')
+        self.skim_percent = QLineEdit(str(host_defaults["skim_percent"]))
         skim_percent_validator = QDoubleValidator(0, 20, 1)
         self.skim_percent.setValidator(skim_percent_validator)
         layout.addRow(QLabel("Stack skimming %:"), self.skim_percent)
 
-        self.number_seats = QLineEdit('3')
+        self.number_seats = QLineEdit(str(host_defaults["number_seats"]))
         number_seats_validator = QIntValidator(2, 6)
         self.number_seats.setValidator(number_seats_validator)
         layout.addRow(QLabel("Number of seats"), self.number_seats)
@@ -232,14 +232,14 @@ class HostRoomTab(QWidget):
 
 
 class MainConnectWindow(QWidget):
-    def __init__(self, set_tutorial, default_nickname, default_server):
+    def __init__(self, set_tutorial, default_nickname, default_server, host_defaults):
         super().__init__()
         layout = QVBoxLayout()
         self.top_window = TopConnectWindow(set_tutorial, default_nickname, default_server)
         layout.addWidget(self.top_window)
         self.connect_option_tabs = QTabWidget()
         self.connect_room_tab = ConnectRoomTab()
-        self.host_room_tab = HostRoomTab()
+        self.host_room_tab = HostRoomTab(host_defaults)
         self.connect_option_tabs.addTab(self.connect_room_tab, 'Connect room')
         self.connect_option_tabs.addTab(self.host_room_tab, 'Host room')
         layout.addWidget(self.connect_option_tabs)
@@ -677,7 +677,8 @@ class MainWindow(QMainWindow):
         self.adjustSize()
 
     def _init_connect(self):
-        self.connect_window = MainConnectWindow(self.set_tutorial, self.config["nickname"], self.config["server"])
+        self.connect_window = MainConnectWindow(self.set_tutorial, self.config["nickname"],
+                                                self.config["server"], self.config["room_host_defaults"])
         self.connect_window.setFixedSize(600, 400)
         self.connect_window.connect_room_tab.connect_btn.pressed.connect(self.guest_connect)
         self.connect_window.host_room_tab.connect_btn.pressed.connect(self.host_connect)

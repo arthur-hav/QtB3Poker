@@ -381,7 +381,7 @@ class Game:
         self.server_config = server_config
         start = {'start': True, 'players': [p.nick for p in players]}
         for p in players:
-            p.chips = server_config.get('start_chips', 500)
+            p.chips = server_config['start_chips']
             p.send_message(start)
 
         self.start_time = datetime.datetime.utcnow()
@@ -391,6 +391,7 @@ class Game:
         self.mongo_db = self.mongo_conn.bordeaux_poker_db
         self.tourney_id = self.mongo_db.tourneys.insert_one({'placements': {},
                                                              'date': self.start_time}).inserted_id
+        self.blind_augment = self.start_time
 
     def check_eliminated(self):
         new_players = [p for p in self.players if p.chips > 0]
@@ -407,19 +408,18 @@ class Game:
 
     def run(self):
         nb_hands = 0
-        self.blind_augment = self.start_time
         while len(self.players) > 1:
             nb_hands += 1
             deck = Deck()
             deck.fisher_yates_shuffle_improved()
             now = datetime.datetime.utcnow()
             elapsed_time = (now - self.blind_augment).total_seconds()
-            if elapsed_time > self.server_config.get('blind_timer', 90):
-                self.blind_augment = self.blind_augment + datetime.timedelta(seconds=self.server_config.get('blind_timer', 90))
+            if elapsed_time > self.server_config['blind_timer']:
+                self.blind_augment = self.blind_augment + datetime.timedelta(seconds=self.server_config['blind_timer'])
                 avg_stack = sum(p.chips for p in self.players) / len(self.players)
                 for player in self.players:
-                    decrease = round(player.chips * self.server_config.get('blind_percent') * 0.01 +
-                                     self.server_config.get('skim_percent') * 0.01 * avg_stack)
+                    decrease = round(player.chips * self.server_config['blind_percent'] * 0.01 +
+                                     self.server_config['skim_percent'] * 0.01 * avg_stack)
                     player.chips = player.chips - decrease
                     if not player.disconnected:
                         message = 'Tournament chips decrease.'
