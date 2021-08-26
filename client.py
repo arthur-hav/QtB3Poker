@@ -193,7 +193,7 @@ class HostRoomTab(QWidget):
         layout = QFormLayout()
         self.setLayout(layout)
         self.room_code_label = QLabel("Room code:")
-        self.room_code = QLabel(''.join(self.code_range[random.randint(0, 62)] for i in range(4)))
+        self.room_code = QLabel(''.join(self.code_range[random.randint(0, 61)] for i in range(4)))
         self.room_code.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         layout.addRow(self.room_code_label, self.room_code)
 
