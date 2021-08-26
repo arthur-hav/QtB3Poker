@@ -70,11 +70,12 @@ class Listener(QObject):
     gamestate = pyqtSignal(dict)
 
     @classmethod
-    def from_host(cls, ip_text, nickname, code, use_ssl, server_config):
+    def from_host(cls, ip_text, port, nickname, code, use_ssl, server_config):
         listener = Listener()
         listener.use_ssl = use_ssl
         listener.server_config = server_config
         listener.ip_text = ip_text
+        listener.port = port
         listener.nickname = nickname
         listener.data = b''
         listener.room_code = code
@@ -84,10 +85,11 @@ class Listener(QObject):
         return listener
 
     @classmethod
-    def from_code(cls, ip_text, nickname, code, use_ssl):
+    def from_code(cls, ip_text, port, nickname, code, use_ssl):
         listener = Listener()
         listener.use_ssl = use_ssl
         listener.ip_text = ip_text
+        listener.port = port
         listener.nickname = nickname
         listener.data = b''
         listener.room_code = code
@@ -97,7 +99,7 @@ class Listener(QObject):
         return listener
 
     def run_connect(self):
-        self.socket.connect((self.ip_text, 33344))
+        self.socket.connect((self.ip_text, self.port))
         if self.use_ssl:
             context = ssl.create_default_context()
             self.socket = context.wrap_socket(self.socket, server_hostname=self.ip_text)
@@ -699,10 +701,11 @@ class MainWindow(QMainWindow):
         slug_nickname = self.connect_window.top_window.nickname.text()
         slug_nickname = re.sub('[^A-Za-z0-9_-]+', '-', slug_nickname)[:16]
         self.net_listener = method(self.connect_window.top_window.ip_text.text(),
-                                               slug_nickname,
-                                               room_code,
-                                               self.config["use_ssl"],
-                                               **kwargs)
+                                   self.config["server_port"],
+                                   slug_nickname,
+                                   room_code,
+                                   self.config["use_ssl"],
+                                   **kwargs)
         self.net_listener.moveToThread(self.listener_thread)
         self.listener_thread.run = self.net_listener.run_connect
         self.net_listener.pkr_connect.connect(self.on_connect)

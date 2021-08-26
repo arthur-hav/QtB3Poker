@@ -24,10 +24,6 @@ def urand():
     return struct.unpack('I', os.urandom(4))[0] * 2 ** -32
 
 
-HOST = '127.0.0.1'  # Standard loopback interface address (localhost)
-PORT = 33344        # Port to listen on (non-privileged ports are > 1023)
-
-
 class Deck:
     def __init__(self):
         self.cards = []

@@ -1,3 +1,4 @@
 use_ssl: True
 nickname: "Your nickname"
 server: "localhost"
+server_port: 33344
