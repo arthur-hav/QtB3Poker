@@ -137,7 +137,7 @@ class Human(Player):
 
     def send_message(self, json_dict):
         try:
-            self.conn.send(json.dumps(json_dict).encode("utf-8") + '\n', encoding='utf-8')
+            self.conn.send((json.dumps(json_dict) + "\n").encode("utf-8"), encoding='utf-8')
         except (OSError, ConnectionError, ssl.SSLError):
             self.disconnected = True
 
@@ -275,9 +275,9 @@ class GameHand:
                 if not player.is_folded:
                     common['players'][i]['holes'] = ''.join(Card.int_to_str(c) for c in player.hand)
             for player in self.players:
-                player.send_state(common)
+                player.send_message(common)
             for obs in self.observers:
-                obs.send_state(common)
+                obs.send_message(common)
         else:
             for i, player in enumerate(self.players):
                 full_state = deepcopy(common)
@@ -292,9 +292,9 @@ class GameHand:
                                    'min_raise': min_raise,
                                    'nl_raise': bool(self.flop1)
                                    })
-                player.send_state(full_state)
+                player.send_message(full_state)
             for obs in self.observers:
-                obs.send_state(common)
+                obs.send_message(common)
 
     def deal_flop(self):
         if len(self.players) == 2:

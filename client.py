@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import Qt, QRect, QObject, pyqtSignal, QThread, QMutex
-from PyQt5.QtGui import QPixmap, QFont, QIntValidator, QDoubleValidator
+from PyQt5.QtGui import QPixmap, QFont, QIntValidator, QDoubleValidator, QWindow
 from PyQt5.QtMultimedia import QSound
 import sentry_sdk
 from tutorial import Tutorial
@@ -70,39 +70,39 @@ class Listener(QObject):
     gamestate = pyqtSignal(dict)
 
     @classmethod
-    def from_host(cls, ip_text, port, nickname, code, use_ssl, server_config):
+    def from_host(cls, server, nickname, code, use_ssl, server_config):
         listener = Listener()
         listener.use_ssl = use_ssl
         listener.server_config = server_config
-        listener.ip_text = ip_text
-        listener.port = port
+        listener.server = server
         listener.nickname = nickname
         listener.data = b''
         listener.room_code = code
         listener.messages = []
         listener.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.host = True
+        listener.done = False
         return listener
 
     @classmethod
-    def from_code(cls, ip_text, port, nickname, code, use_ssl):
+    def from_code(cls, server, nickname, code, use_ssl):
         listener = Listener()
         listener.use_ssl = use_ssl
-        listener.ip_text = ip_text
-        listener.port = port
+        listener.server = server
         listener.nickname = nickname
         listener.data = b''
         listener.room_code = code
         listener.messages = []
         listener.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.host = False
+        listener.done = False
         return listener
 
     def run_connect(self):
-        self.socket.connect((self.ip_text, self.port))
+        self.socket.connect(self.server)
         if self.use_ssl:
             context = ssl.create_default_context()
-            self.socket = context.wrap_socket(self.socket, server_hostname=self.ip_text)
+            self.socket = context.wrap_socket(self.socket, server_hostname=self.server[0])
         self.socket.setblocking(False)
         connect_data = {'nick': self.nickname, 'room_code': self.room_code}
         if self.host:
@@ -122,7 +122,7 @@ class Listener(QObject):
         self.pkr_start.emit(json.loads(self.messages.pop(0)))
 
     def run_main(self):
-        while True:
+        while not self.done:
             while self.messages:
                 self.gamestate.emit(json.loads(self.messages.pop(0)))
             ready = select.select([self.socket], [], [], 0.1)
@@ -515,7 +515,9 @@ class BetActions(QWidget):
          self.bet.setText(f'Raise {value}')
 
 
-class PokerTableWidget(QDialog):
+class PokerTableWidget(QWidget):
+    die = pyqtSignal()
+
     def __init__(self, nickname):
         super().__init__()
         self.bg = QLabel(parent=self)
@@ -531,7 +533,6 @@ class PokerTableWidget(QDialog):
         self.to_call = 0
         self.players = []
         self.nickname = nickname
-
         self.pot_size = BetAmountWidget(nb_cols=3)
         self.pot_size.setParent(self)
         self.pot_size.move(340, 150)
@@ -541,6 +542,10 @@ class PokerTableWidget(QDialog):
         self.event_log = EventLog()
         self.event_log.setParent(self)
         self.event_log.move(20, 500)
+
+    def closeEvent(self, *args, **kwargs):
+        self.die.emit()
+        super().closeEvent(*args, **kwargs)
 
     def setWinningHand(self, winning_hand):
         for player in self.players:
@@ -656,60 +661,40 @@ class PokerTableWidget(QDialog):
         self.bet_actions.show()
 
 
-class MainWindow(QMainWindow):
-
-    def __init__(self, config):
+class Game(QObject):
+    def __init__(self, nickname, ip_text, port, use_ssl, room_tab):
         super().__init__()
-        self.config = config
-        self.setWindowTitle('Bordeaux 3')
-        self._init_connect()
-        self.adjustSize()
-        self.net_listener = None
-        self.poker_timer = None
+        self.nickname = nickname
+        self.poker_table = None
         self.listener_thread = QThread()
-
-    def set_tutorial(self):
-        self.t = Tutorial()
-        self.t.show()
-
-    def _done(self):
-        self.setCentralWidget(self.connect_window)
-        self.adjustSize()
-
-    def _init_connect(self):
-        self.connect_window = MainConnectWindow(self.set_tutorial, self.config["nickname"],
-                                                self.config["server"], self.config["room_host_defaults"])
-        self.connect_window.setFixedSize(600, 400)
-        self.connect_window.connect_room_tab.connect_btn.pressed.connect(self.guest_connect)
-        self.connect_window.host_room_tab.connect_btn.pressed.connect(self.host_connect)
-        self.setCentralWidget(self.connect_window)
-        self.adjustSize()
+        self.room_tab = room_tab
+        self.server = ip_text, port
+        self.use_ssl = use_ssl
 
     def host_connect(self):
-        host_tab = self.connect_window.host_room_tab
-        server_config = {'start_chips': int(host_tab.start_chips.text()),
-                         'blind_timer': int(host_tab.blind_timer.text()),
-                         'blind_percent': float(host_tab.blind_percent.text()),
-                         'skim_percent': float(host_tab.skim_percent.text()),
-                         'number_seats': int(host_tab.number_seats.text())}
-        self.try_connect(host_tab.room_code.text(), Listener.from_host, server_config=server_config)
+        server_config = {'start_chips': int(self.room_tab.start_chips.text()),
+                         'blind_timer': int(self.room_tab.blind_timer.text()),
+                         'blind_percent': float(self.room_tab.blind_percent.text()),
+                         'skim_percent': float(self.room_tab.skim_percent.text()),
+                         'number_seats': int(self.room_tab.number_seats.text())}
+        self.try_connect(self.room_tab.room_code.text(), Listener.from_host, server_config=server_config)
 
     def guest_connect(self):
-        con_tab = self.connect_window.connect_room_tab
-        self.try_connect(con_tab.room_code.text(), Listener.from_code)
+        self.try_connect(self.room_tab.room_code.text(), Listener.from_code)
 
     def try_connect(self, room_code, method, **kwargs):
-        slug_nickname = self.connect_window.top_window.nickname.text()
-        slug_nickname = re.sub('[^A-Za-z0-9_-]+', '-', slug_nickname)[:16]
-        self.net_listener = method(self.connect_window.top_window.ip_text.text(),
-                                   self.config["server_port"],
+        slug_nickname = re.sub('[^A-Za-z0-9_-]+', '-', self.nickname)[:16]
+        self.net_listener = method(self.server,
                                    slug_nickname,
                                    room_code,
-                                   self.config["use_ssl"],
+                                   self.use_ssl,
                                    **kwargs)
         self.net_listener.moveToThread(self.listener_thread)
-        self.listener_thread.run = self.net_listener.run_connect
+        self.listener_thread.started.connect(self.net_listener.run_connect)
         self.net_listener.pkr_connect.connect(self.on_connect)
+        self.net_listener.pkr_connect.connect(self.net_listener.run_start)
+        self.net_listener.pkr_start.connect(self.net_listener.run_main)
+
         self.listener_thread.start()
 
     def on_connect(self, nickname):
@@ -717,11 +702,8 @@ class MainWindow(QMainWindow):
         self.poker_table.bet_actions.call.pressed.connect(self.call_btn)
         self.poker_table.bet_actions.fold.pressed.connect(self.fold_btn)
         self.poker_table.bet_actions.bet.pressed.connect(self.bet_btn)
+        self.poker_table.die.connect(self.done)
         self.poker_table.show()
-        self.listener_thread.wait()
-        self.listener_thread.run = self.net_listener.run_start
-        self.net_listener.pkr_start.connect(self.on_start)
-        self.listener_thread.start()
 
     def call_btn(self):
         self.net_listener.data = b'c'
@@ -734,10 +716,7 @@ class MainWindow(QMainWindow):
 
     def on_start(self, startstate):
         self.poker_table.setStart(startstate)
-        self.listener_thread.wait()
-        self.listener_thread.run = self.net_listener.run_main
         self.net_listener.gamestate.connect(self.on_recv)
-        self.listener_thread.start()
         self.timer_mutex = QMutex()
         self.poker_timer = PokerTimer()
         self.poker_timer_thread = QThread()
@@ -771,6 +750,62 @@ class MainWindow(QMainWindow):
         self.poker_table.setWinningHand(gamestate.get('winning_hand', ''))
         self.poker_table.playSounds(gamestate.get('last_action'))
         self.timer_mutex.unlock()
+
+    def done(self):
+        self.net_listener.done = True
+        self.poker_timer.done = True
+
+
+class MainWindow(QMainWindow):
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.setWindowTitle('Bordeaux 3')
+        self._init_connect()
+        self.adjustSize()
+        self.net_listener = None
+        self.poker_timer = None
+        self.games = {}
+
+    def set_tutorial(self):
+        self.t = Tutorial()
+        self.t.show()
+
+    def _done(self):
+        self.setCentralWidget(self.connect_window)
+        self.adjustSize()
+
+    def _init_connect(self):
+        self.connect_window = MainConnectWindow(self.set_tutorial, self.config["nickname"],
+                                                self.config["server"], self.config["room_host_defaults"])
+        self.connect_window.setFixedSize(600, 400)
+        self.connect_window.connect_room_tab.connect_btn.pressed.connect(self.guest_connect)
+        self.connect_window.host_room_tab.connect_btn.pressed.connect(self.host_connect)
+        self.setCentralWidget(self.connect_window)
+        self.adjustSize()
+
+    def guest_connect(self):
+        key = 1 if not self.games else max(self.games.keys()) + 1
+        self.games[key] = Game(self.connect_window.top_window.nickname.text(),
+                 self.connect_window.top_window.ip_text.text(),
+                 self.config["server_port"],
+                 self.config["use_ssl"],
+                 self.connect_window.connect_room_tab,
+                 )
+        print(self.games)
+        self.games[key].guest_connect()
+
+    def host_connect(self):
+        key = 1 if not self.games else max(self.games.keys()) + 1
+        self.games[key] = Game(self.connect_window.top_window.nickname.text(),
+                 self.connect_window.top_window.ip_text.text(),
+                 self.config["server_port"],
+                 self.config["use_ssl"],
+                 self.connect_window.host_room_tab,
+                 )
+        print(self.games)
+        self.games[key].host_connect()
 
 
 def main():
