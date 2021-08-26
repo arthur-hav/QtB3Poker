@@ -487,7 +487,7 @@ def main():
         if config["use_ssl"]:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(config["pem_chain"], config["pem_privkey"])
-        s.bind((config["listen_address"], PORT))
+        s.bind((config["listen_address"], config["listen_port"]))
         s.listen()
         if config["use_ssl"]:
             ssock = context.wrap_socket(s, server_side=True)
