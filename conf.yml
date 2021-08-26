@@ -1,1 +1,3 @@
 use_ssl: True
+nickname: "Your nickname"
+server: "localhost"

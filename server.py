@@ -486,7 +486,7 @@ class Game:
 
 
 def main():
-    config = yaml.load(open("server-conf.yml", "r"))
+    config = yaml.safe_load(open("server-conf.yml", "r"))
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         if config["use_ssl"]:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

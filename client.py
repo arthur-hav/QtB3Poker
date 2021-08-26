@@ -230,10 +230,10 @@ class HostRoomTab(QWidget):
 
 
 class MainConnectWindow(QWidget):
-    def __init__(self, set_tutorial):
+    def __init__(self, set_tutorial, default_nickname, default_server):
         super().__init__()
         layout = QVBoxLayout()
-        self.top_window = TopConnectWindow(set_tutorial=set_tutorial)
+        self.top_window = TopConnectWindow(set_tutorial, default_nickname, default_server)
         layout.addWidget(self.top_window)
         self.connect_option_tabs = QTabWidget()
         self.connect_room_tab = ConnectRoomTab()
@@ -243,8 +243,9 @@ class MainConnectWindow(QWidget):
         layout.addWidget(self.connect_option_tabs)
         self.setLayout(layout)
 
+
 class TopConnectWindow(QWidget):
-    def __init__(self, set_tutorial):
+    def __init__(self, set_tutorial, default_nickname, default_server):
         super().__init__()
         layout = QFormLayout()
         self.setLayout(layout)
@@ -253,9 +254,10 @@ class TopConnectWindow(QWidget):
         layout.addRow(self.tutorial_btn)
         self.tutorial_btn.pressed.connect(set_tutorial)
         self.nickname = QLineEdit()
+        self.nickname.setText(default_nickname)
         layout.addRow(QLabel("Your nickname"), self.nickname)
         self.ip_text = QLineEdit()
-        self.ip_text.setText('localhost')
+        self.ip_text.setText(default_server)
         layout.addRow(QLabel("Server name"), self.ip_text)
 
 
@@ -673,7 +675,7 @@ class MainWindow(QMainWindow):
         self.adjustSize()
 
     def _init_connect(self):
-        self.connect_window = MainConnectWindow(self.set_tutorial)
+        self.connect_window = MainConnectWindow(self.set_tutorial, self.config["nickname"], self.config["server"])
         self.connect_window.setFixedSize(600, 400)
         self.connect_window.connect_room_tab.connect_btn.pressed.connect(self.guest_connect)
         self.connect_window.host_room_tab.connect_btn.pressed.connect(self.host_connect)
@@ -769,7 +771,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication([])
-    config = yaml.load(open("client-conf.yaml"))
+    config = yaml.safe_load(open("conf.yml", "r"))
     mw = MainWindow(config)
     mw.show()
     app.exec_()
