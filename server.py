@@ -18,6 +18,7 @@ import re
 import ssl
 from collections import defaultdict
 import yaml
+import sys
 
 
 def urand():
@@ -87,28 +88,21 @@ class Human(Player):
         self.disconnected = False
         self.action_queue = queue.Queue()
 
-    def listen(self):
-        while True:
-            ready = select.select([self.conn], [], [], 1)
-            if ready[0]:
-                try:
-                    action = self.conn.recv(4096).decode('utf-8').strip()
-                    if action == '':
-                        self.action_queue.put('f')
-                        self.disconnected = True
-                    else:
-                        self.action_queue.put(action)
-                except (ConnectionError, OSError, ssl.SSLError):
-                    self.action_queue.put('f')
-                    self.disconnected = True
-
     def act(self, gamehand):
         if self.disconnected:
             action = 'f'
         else:
-            try:
-                action = self.action_queue.get(True, gamehand.timeout)
-            except queue.Empty:
+            ready = select.select([self.conn], [], [], gamehand.timeout)
+            if ready[0]:
+                try:
+                    action = self.conn.recv(4096).decode('utf-8').strip()
+                    if action == '':
+                        action = 'f'
+                        self.disconnected = True
+                except (ConnectionError, OSError, ssl.SSLError):
+                    action = 'f'
+                    self.disconnected = True
+            else:
                 action = 'f'
 
         if action.lower() == 'c':
@@ -509,35 +503,35 @@ def main():
                 mess = conn.recv(4096).decode('utf-8')
                 mess = json.loads(mess)
                 room = mess['room_code']
-                if 'config' in mess and room not in confs:
-                    confs[room] = mess['config']
-                if not confs[room]:
-                    conn.close()
-                    continue
                 nick = mess['nick']
                 nick = re.sub('[^A-Za-z0-9_-]+', '-', nick)[:16]
                 p = Human(nick, conn)
-                if not mess["spectate"]:
-                    rooms[room].append(p)
-                else:
-                    observers[room].append(p)
-                rooms[room] = [p for p in rooms[room] if not p.disconnected]
+                sys.stderr.write(str(p.nick) + room + str(list(games.keys())) + "\n")
                 if room in games:
                     if mess["spectate"]:
                         games[room].observers.append(p)
+                        start = {'start': True, 'players': [p.nick for p in games[room].players]}
+                        p.send_message(start)
                     else:
-                        for p in games[room].players:
-                            if p.disconnected and p.nick == nick:
-                                p.disconnected = False
-                                p.conn = conn
-                                start = {'start': True, 'players': [p.nick for p in games[room].players]}
-                                p.send_message(start)
-                                listener = mp.Thread(target=p.listen)
-                                listener.start()
+                        for player in games[room].players:
+                            if player.disconnected and player.nick == nick:
+                                player.disconnected = False
+                                player.conn = conn
+                                start = {'start': True, 'players': [pl.nick for pl in games[room].players]}
+                                player.send_message(start)
+                    continue
                 else:
-                    listener = mp.Thread(target=p.listen)
-                    listener.start()
-            except (json.JSONDecodeError, KeyError, ssl.SSLError):
+                    if 'config' in mess and room not in confs:
+                        confs[room] = mess['config']
+                    if not confs[room]:
+                        conn.close()
+                        continue
+                    if not mess["spectate"]:
+                        rooms[room].append(p)
+                    else:
+                        observers[room].append(p)
+                    rooms[room] = [p for p in rooms[room] if not p.disconnected]
+            except (json.JSONDecodeError, KeyError, ssl.SSLError) as e:
                 conn.close()
                 continue
             if len(rooms[room]) >= confs[room]['number_seats']:

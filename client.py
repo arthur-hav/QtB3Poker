@@ -63,11 +63,40 @@ class PokerTimer(QObject):
             self.timer_sig.emit()
             time.sleep(0.5)
 
+class MainListener(QObject):
+    gamestate = pyqtSignal(dict)
+
+    def __init__(self, conn):
+        super().__init__()
+        self.data = b''
+        self.done = False
+        self.messages = []
+        self.socket = conn
+
+    def run_main(self):
+        while not self.done:
+            while self.messages:
+                self.gamestate.emit(json.loads(self.messages.pop(0)))
+            ready = select.select([self.socket], [], [], 0.1)
+            if ready[0]:
+                try:
+                    self.messages = self.socket.recv(4096).decode('utf-8').strip().split('\n')
+                    if self.messages == ['']:
+                        break
+                except ssl.SSLWantReadError:
+                    continue
+                except (OSError, ssl.SSLError):
+                    self.done = True
+            if self.data:
+                self.socket.send(self.data)
+                self.data = b''
+        self.socket.close()
+
+
 
 class Listener(QObject):
     pkr_connect = pyqtSignal(str)
     pkr_start = pyqtSignal(dict)
-    gamestate = pyqtSignal(dict)
 
     @classmethod
     def from_host(cls, server, nickname, code, use_ssl, spectate_only, server_config):
@@ -77,12 +106,9 @@ class Listener(QObject):
         listener.server_config = server_config
         listener.server = server
         listener.nickname = nickname
-        listener.data = b''
         listener.room_code = code
-        listener.messages = []
         listener.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.host = True
-        listener.done = False
         return listener
 
     @classmethod
@@ -92,12 +118,9 @@ class Listener(QObject):
         listener.spectate_only = spectate_only
         listener.server = server
         listener.nickname = nickname
-        listener.data = b''
         listener.room_code = code
-        listener.messages = []
         listener.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.host = False
-        listener.done = False
         return listener
 
     def run_connect(self):
@@ -122,23 +145,6 @@ class Listener(QObject):
                 except ssl.SSLWantReadError:
                     continue
         self.pkr_start.emit(json.loads(self.messages.pop(0)))
-
-    def run_main(self):
-        while not self.done:
-            while self.messages:
-                self.gamestate.emit(json.loads(self.messages.pop(0)))
-            ready = select.select([self.socket], [], [], 0.1)
-            if ready[0]:
-                try:
-                    self.messages = self.socket.recv(4096).decode('utf-8').strip().split('\n')
-                    if self.messages == ['']:
-                        break
-                except ssl.SSLWantReadError:
-                    continue
-            if self.data:
-                self.socket.send(self.data)
-                self.data = b''
-        self.socket.close()
 
 
 class Board(QWidget):
@@ -523,7 +529,7 @@ class BetActions(QWidget):
 class PokerTableWidget(QWidget):
     die = pyqtSignal()
 
-    def __init__(self, nickname):
+    def __init__(self, nickname, spectate_only):
         super().__init__()
         self.bg = QLabel(parent=self)
         pixmap = QPixmap()
@@ -538,6 +544,7 @@ class PokerTableWidget(QWidget):
         self.to_call = 0
         self.players = []
         self.nickname = nickname
+        self.spectate_only = spectate_only
         self.pot_size = BetAmountWidget(nb_cols=3)
         self.pot_size.setParent(self)
         self.pot_size.move(340, 150)
@@ -621,8 +628,11 @@ class PokerTableWidget(QWidget):
 
     def setStart(self, startstate):
         nicks = [str(p) for p in startstate['players']]
-        idx_self = nicks.index(self.nickname)
-        rotated_nicks = nicks[idx_self:] + nicks[:idx_self]
+        if self.spectate_only:
+            rotated_nicks = nicks
+        else:
+            idx_self = nicks.index(self.nickname)
+            rotated_nicks = nicks[idx_self:] + nicks[:idx_self]
 
         players_layout = players_layout_6m
         if len(rotated_nicks) == 3:
@@ -711,7 +721,7 @@ class Game(QObject):
         self.starter_thread.start()
 
     def on_connect(self, nickname):
-        self.poker_table = PokerTableWidget(nickname)
+        self.poker_table = PokerTableWidget(nickname, self.spectate_only)
         self.poker_table.bet_actions.call.pressed.connect(self.call_btn)
         self.poker_table.bet_actions.fold.pressed.connect(self.fold_btn)
         self.poker_table.bet_actions.bet.pressed.connect(self.bet_btn)
@@ -719,20 +729,21 @@ class Game(QObject):
         self.poker_table.show()
 
     def call_btn(self):
-        self.net_listener.data = b'c'
+        self.main_listener.data = b'c'
 
     def fold_btn(self):
-        self.net_listener.data = b'f'
+        self.main_listener.data = b'f'
 
     def bet_btn(self):
-        self.net_listener.data = f'r {self.poker_table.bet_actions.raise_group.raise_size}'.encode('utf-8')
+        self.main_listener.data = f'r {self.poker_table.bet_actions.raise_group.raise_size}'.encode('utf-8')
 
     def on_start(self, startstate):
         self.poker_table.setStart(startstate)
         self.poker_timer_thread.start()
-        self.net_listener.moveToThread(self.listener_thread)
-        self.net_listener.gamestate.connect(self.on_recv)
-        self.listener_thread.started.connect(self.net_listener.run_main)
+        self.main_listener = MainListener(self.net_listener.socket)
+        self.main_listener.moveToThread(self.listener_thread)
+        self.main_listener.gamestate.connect(self.on_recv)
+        self.listener_thread.started.connect(self.main_listener.run_main)
         self.listener_thread.start()
 
     def decrease_timer(self):
@@ -762,7 +773,7 @@ class Game(QObject):
         self.timer_mutex.unlock()
 
     def done(self):
-        self.net_listener.done = True
+        self.main_listener.done = True
         self.poker_timer.done = True
 
 
