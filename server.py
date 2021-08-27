@@ -514,7 +514,7 @@ def main():
                     continue
                 nick = mess['nick']
                 nick = re.sub('[^A-Za-z0-9_-]+', '-', nick)[:16]
-
+                p = Human(nick, conn)
                 if not mess["spectate"]:
                     rooms[room].append(p)
                 else:
@@ -531,7 +531,6 @@ def main():
                                 listener = mp.Thread(target=p.listen)
                                 listener.start()
                 else:
-                    p = Human(nick, conn)
                     listener = mp.Thread(target=p.listen)
                     listener.start()
             except (json.JSONDecodeError, KeyError, ssl.SSLError):
