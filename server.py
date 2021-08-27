@@ -382,6 +382,8 @@ class Game:
         for p in players:
             p.chips = server_config['start_chips']
             p.send_message(start)
+        for obs in observers:
+            obs.send_message(start)
 
         self.start_time = datetime.datetime.utcnow()
         self.players = players
@@ -528,6 +530,8 @@ def main():
                             if p.disconnected and p.nick == nick:
                                 p.disconnected = False
                                 p.conn = conn
+                                start = {'start': True, 'players': [p.nick for p in games[room].players]}
+                                p.send_message(start)
                                 listener = mp.Thread(target=p.listen)
                                 listener.start()
                 else:
