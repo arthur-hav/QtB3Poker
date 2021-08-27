@@ -70,9 +70,10 @@ class Listener(QObject):
     gamestate = pyqtSignal(dict)
 
     @classmethod
-    def from_host(cls, server, nickname, code, use_ssl, server_config):
+    def from_host(cls, server, nickname, code, use_ssl, spectate_only, server_config):
         listener = Listener()
         listener.use_ssl = use_ssl
+        listener.spectate_only = spectate_only
         listener.server_config = server_config
         listener.server = server
         listener.nickname = nickname
@@ -85,9 +86,10 @@ class Listener(QObject):
         return listener
 
     @classmethod
-    def from_code(cls, server, nickname, code, use_ssl):
+    def from_code(cls, server, nickname, code, use_ssl, spectate_only):
         listener = Listener()
         listener.use_ssl = use_ssl
+        listener.spectate_only = spectate_only
         listener.server = server
         listener.nickname = nickname
         listener.data = b''
@@ -104,7 +106,7 @@ class Listener(QObject):
             context = ssl.create_default_context()
             self.socket = context.wrap_socket(self.socket, server_hostname=self.server[0])
         self.socket.setblocking(False)
-        connect_data = {'nick': self.nickname, 'room_code': self.room_code}
+        connect_data = {'nick': self.nickname, "spectate": self.spectate_only, 'room_code': self.room_code}
         if self.host:
             connect_data['config'] = self.server_config
         self.socket.send(json.dumps(connect_data).encode('utf-8'))
@@ -261,6 +263,8 @@ class TopConnectWindow(QWidget):
         self.ip_text = QLineEdit()
         self.ip_text.setText(default_server)
         layout.addRow(QLabel("Server name"), self.ip_text)
+        self.spectate = QCheckBox()
+        layout.addRow(QLabel("Spectate only"), self.spectate)
 
 
 class BetAmountWidget(QWidget):
@@ -663,9 +667,10 @@ class PokerTableWidget(QWidget):
 
 
 class Game(QObject):
-    def __init__(self, nickname, ip_text, port, use_ssl, room_tab):
+    def __init__(self, nickname, ip_text, port, use_ssl, spectate_only, room_tab):
         super().__init__()
         self.nickname = nickname
+        self.spectate_only = spectate_only
         self.poker_table = None
         self.starter_thread = QThread()
         self.listener_thread = QThread()
@@ -696,6 +701,7 @@ class Game(QObject):
                                    slug_nickname,
                                    room_code,
                                    self.use_ssl,
+                                   self.spectate_only,
                                    **kwargs)
         self.net_listener.moveToThread(self.starter_thread)
         self.starter_thread.started.connect(self.net_listener.run_connect)
@@ -792,21 +798,23 @@ class MainWindow(QMainWindow):
     def guest_connect(self):
         key = 1 if not self.games else max(self.games.keys()) + 1
         self.games[key] = Game(self.connect_window.top_window.nickname.text(),
-                 self.connect_window.top_window.ip_text.text(),
-                 self.config["server_port"],
-                 self.config["use_ssl"],
-                 self.connect_window.connect_room_tab,
-                 )
+                               self.connect_window.top_window.ip_text.text(),
+                               self.config["server_port"],
+                               self.config["use_ssl"],
+                               self.connect_window.top_window.spectate.checkState(),
+                               self.connect_window.connect_room_tab,
+                               )
         self.games[key].guest_connect()
 
     def host_connect(self):
         key = 1 if not self.games else max(self.games.keys()) + 1
         self.games[key] = Game(self.connect_window.top_window.nickname.text(),
-                 self.connect_window.top_window.ip_text.text(),
-                 self.config["server_port"],
-                 self.config["use_ssl"],
-                 self.connect_window.host_room_tab,
-                 )
+                               self.connect_window.top_window.ip_text.text(),
+                               self.config["server_port"],
+                               self.config["use_ssl"],
+                               self.connect_window.top_window.spectate.checkState(),
+                               self.connect_window.host_room_tab,
+                               )
         self.games[key].host_connect()
 
 

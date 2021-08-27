@@ -376,7 +376,7 @@ class GameHand:
 
 
 class Game:
-    def __init__(self, players, server_config):
+    def __init__(self, players, observers, server_config):
         self.server_config = server_config
         start = {'start': True, 'players': [p.nick for p in players]}
         for p in players:
@@ -385,7 +385,7 @@ class Game:
 
         self.start_time = datetime.datetime.utcnow()
         self.players = players
-        self.observers = []
+        self.observers = observers
         self.mongo_conn = MongoClient()
         self.mongo_db = self.mongo_conn.bordeaux_poker_db
         self.tourney_id = self.mongo_db.tourneys.insert_one({'placements': {},
@@ -493,7 +493,9 @@ def main():
         else:
             ssock = s
         rooms = defaultdict(list)
+        observers = defaultdict(list)
         confs = defaultdict(dict)
+        games = {}
         while True:
             conn, addr = ssock.accept()
             conn.setblocking(0)
@@ -504,27 +506,45 @@ def main():
             try:
                 mess = conn.recv(4096).decode('utf-8')
                 mess = json.loads(mess)
-                nick = mess['nick']
-                nick = re.sub('[^A-Za-z0-9_-]+', '-', nick)[:16]
                 room = mess['room_code']
                 if 'config' in mess and room not in confs:
                     confs[room] = mess['config']
                 if not confs[room]:
                     conn.close()
                     continue
+                nick = mess['nick']
+                nick = re.sub('[^A-Za-z0-9_-]+', '-', nick)[:16]
+
+                if not mess["spectate"]:
+                    rooms[room].append(p)
+                else:
+                    observers[room].append(p)
+                rooms[room] = [p for p in rooms[room] if not p.disconnected]
+                if room in games:
+                    if mess["spectate"]:
+                        games[room].observers.append(p)
+                    else:
+                        for p in games[room].players:
+                            if p.disconnected and p.nick == nick:
+                                p.disconnected = False
+                                p.conn = conn
+                                listener = mp.Thread(target=p.listen)
+                                listener.start()
+                else:
+                    p = Human(nick, conn)
+                    listener = mp.Thread(target=p.listen)
+                    listener.start()
             except (json.JSONDecodeError, KeyError, ssl.SSLError):
                 conn.close()
                 continue
-            p = Human(nick, conn)
-            listener = mp.Thread(target=p.listen)
-            listener.start()
-            rooms[room].append(p)
-            rooms[room] = [p for p in rooms[room] if not p.disconnected]
             if len(rooms[room]) >= confs[room]['number_seats']:
-                g = Game(rooms[room], confs[room])
+                g = Game(rooms[room], observers[room], confs[room])
                 t = mp.Thread(target=g.run)
                 t.start()
                 del rooms[room]
                 del confs[room]
+                if observers[room]:
+                    del observers[room]
+                games[room] = g
 
 main()
