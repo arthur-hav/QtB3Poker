@@ -1,3 +1,6 @@
 pymongo
 pyYAML
 pika
+flask
+pyjwt
+requests
