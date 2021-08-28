@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import socket
 import json
 import time
 import itertools
@@ -9,26 +8,16 @@ import os
 from math import floor
 import struct
 from copy import deepcopy
-import threading as mp
 import queue
 import select
 from pymongo import MongoClient
 import datetime
 import re
 import ssl
-from collections import defaultdict
 import yaml
-import sys
 import pika
 
 
-connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-channel = connection.channel()
-channel.queue_declare(queue='hello')
-channel.basic_publish(exchange='',
-                      routing_key='hello',
-                      body=b'Hello World!')
-connection.close()
 
 
 def urand():
@@ -86,8 +75,6 @@ class Player:
             return
         self.amount_bet = gamehand.max_amount_bet
 
-    def send_message(self, message):
-        pass
 
 
 class Human(Player):
@@ -139,17 +126,11 @@ class Human(Player):
                                                                 'player': self.nick})
             gamehand.last_action = 'fold'
 
-    def send_message(self, json_dict):
-        try:
-            self.conn.send((json.dumps(json_dict) + "\n").encode("utf-8"))
-        except (OSError, ConnectionError, ssl.SSLError):
-            self.disconnected = True
-
 
 class GameHand:
-    def __init__(self, players, observers, deck, mongo_db, tourney_id):
+    def __init__(self, players, game, deck, mongo_db, tourney_id):
         self.players = players
-        self.observers = observers
+        self.game = game
         self.flop1 = []
         self.flop2 = []
         self.turn1 = []
@@ -272,33 +253,29 @@ class GameHand:
             ],
             'last_action': self.last_action,
         }
+        private = {}
 
         if showdown:
             common['winning_hand'] = ''.join(Card.int_to_str(c) for c in showdown)
             for i, player in enumerate(self.players):
                 if not player.is_folded:
                     common['players'][i]['holes'] = ''.join(Card.int_to_str(c) for c in player.hand)
-            for player in self.players:
-                player.send_message(common)
-            for obs in self.observers:
-                obs.send_message(common)
         else:
             for i, player in enumerate(self.players):
-                full_state = deepcopy(common)
                 if self.flop1:
                     min_raise = max(2 * (self.max_amount_bet - player.amount_bet), 10)
                 else:   # preflop
                     min_raise = self.min_raise + self.max_amount_bet - player.amount_bet
                 min_raise = min(min_raise, player.chips)
                 to_call = min(self.max_amount_bet - player.amount_bet, player.chips)
-                full_state['players'][i]['holes'] = ''.join(Card.int_to_str(c) for c in player.hand)
-                full_state.update({'to_call': to_call,
-                                   'min_raise': min_raise,
-                                   'nl_raise': bool(self.flop1)
-                                   })
-                player.send_message(full_state)
-            for obs in self.observers:
-                obs.send_message(common)
+                private[player.nick] = {'to_call': to_call,
+                                        'min_raise': min_raise,
+                                        'nl_raise': bool(self.flop1),
+                                        'holes':''.join(Card.int_to_str(c) for c in player.hand)
+                                        }
+        self.game.broadcast(common)
+        for p, v in private.items():
+            self.game.player_send(p, v)
 
     def deal_flop(self):
         if len(self.players) == 2:
@@ -380,35 +357,44 @@ class GameHand:
 
 
 class Game:
-    def __init__(self, players, observers, server_config):
+    def __init__(self, players, code, channel, server_config):
         self.server_config = server_config
         start = {'start': True, 'players': [p.nick for p in players]}
+        self.channel = channel
         for p in players:
             p.chips = server_config['start_chips']
-            p.send_message(start)
-        for obs in observers:
-            obs.send_message(start)
+            channel.queue_declare(queue=code + '.' + p.nick)
+        self.broadcast(start)
 
         self.start_time = datetime.datetime.utcnow()
         self.players = players
-        self.observers = observers
+        self.code = code
         self.mongo_conn = MongoClient()
         self.mongo_db = self.mongo_conn.bordeaux_poker_db
         self.tourney_id = self.mongo_db.tourneys.insert_one({'placements': {},
                                                              'date': self.start_time}).inserted_id
         self.blind_augment = self.start_time
 
+    def broadcast(self, msg):
+        self.channel.basic_publish(exchange='',
+                                   routing_key=self.code,
+                                   body=json.dumps(msg).encode('utf-8'))
+
+    def send_player(self, p, msg):
+        self.channel.basic_publish(exchange='',
+                                   routing_key=self.code + '.' + p.nick,
+                                   body=json.dumps(msg).encode('utf-8'))
+
     def check_eliminated(self):
+        eliminated_players = [p for p in self.players if p.chips <= 0]
         new_players = [p for p in self.players if p.chips > 0]
         place = len(new_players) + 1
         if len(new_players) < len(self.players):
-            for p in self.players:
-                if p not in new_players:
-                    if not p.disconnected:
-                        p.send_message({'finished': place})
-                    self.observers.append(p)
-                    self.mongo_db.tourneys.update_one({'_id': self.tourney_id},
-                                                      {'$set': {f'placements.{p.nick}': place}})
+            for p in eliminated_players:
+                self.broadcast({'finished': p.nick,
+                                'place': place})
+                self.mongo_db.tourneys.update_one({'_id': self.tourney_id},
+                                                  {'$set': {f'placements.{p.nick}': place}})
         self.players = new_players
 
     def run(self):
@@ -422,17 +408,16 @@ class Game:
             if elapsed_time > self.server_config['blind_timer']:
                 self.blind_augment = self.blind_augment + datetime.timedelta(seconds=self.server_config['blind_timer'])
                 avg_stack = sum(p.chips for p in self.players) / len(self.players)
+                self.broadcast({'log': 'Tournament chips decrease.'})
                 for player in self.players:
                     decrease = round(player.chips * self.server_config['blind_percent'] * 0.01 +
                                      self.server_config['skim_percent'] * 0.01 * avg_stack)
                     player.chips = player.chips - decrease
                     if not player.disconnected:
-                        message = 'Tournament chips decrease.'
-                        player.send_message({'log': message})
                         message = f'You were removed {decrease} chips'
-                        player.send_message({'log': message})
+                        self.send_player(player, {'log': message})
             self.check_eliminated()
-            hand = GameHand(self.players, self.observers, deck, self.mongo_db, self.tourney_id)
+            hand = GameHand(self.players, self, deck, self.mongo_db, self.tourney_id)
             if len(self.players) <= 1:
                 break
             to_act = hand.deal_preflop()
@@ -486,72 +471,26 @@ class Game:
             self.check_eliminated()
 
 
-def main():
-    config = yaml.safe_load(open("server-conf.yml", "r"))
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        if config["use_ssl"]:
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain(config["pem_chain"], config["pem_privkey"])
-        s.bind((config["listen_address"], config["listen_port"]))
-        s.listen()
-        if config["use_ssl"]:
-            ssock = context.wrap_socket(s, server_side=True)
-        else:
-            ssock = s
-        rooms = defaultdict(list)
-        observers = defaultdict(list)
-        confs = defaultdict(dict)
-        games = {}
-        while True:
-            conn, addr = ssock.accept()
-            conn.setblocking(0)
-            ready = select.select([conn], [], [], 5)
-            if not ready[0]:
-                conn.close()
-                continue
-            try:
-                mess = conn.recv(4096).decode('utf-8')
-                mess = json.loads(mess)
-                room = mess['room_code']
-                nick = mess['nick']
-                nick = re.sub('[^A-Za-z0-9_-]+', '-', nick)[:16]
-                p = Human(nick, conn)
-                sys.stderr.write(str(p.nick) + room + str(list(games.keys())) + "\n")
-                if room in games:
-                    if mess["spectate"]:
-                        games[room].observers.append(p)
-                        start = {'start': True, 'players': [p.nick for p in games[room].players]}
-                        p.send_message(start)
-                    else:
-                        for player in games[room].players:
-                            if player.disconnected and player.nick == nick:
-                                player.disconnected = False
-                                player.conn = conn
-                                start = {'start': True, 'players': [pl.nick for pl in games[room].players]}
-                                player.send_message(start)
-                    continue
-                else:
-                    if 'config' in mess and room not in confs:
-                        confs[room] = mess['config']
-                    if not confs[room]:
-                        conn.close()
-                        continue
-                    if not mess["spectate"]:
-                        rooms[room].append(p)
-                    else:
-                        observers[room].append(p)
-                    rooms[room] = [p for p in rooms[room] if not p.disconnected]
-            except (json.JSONDecodeError, KeyError, ssl.SSLError) as e:
-                conn.close()
-                continue
-            if len(rooms[room]) >= confs[room]['number_seats']:
-                g = Game(rooms[room], observers[room], confs[room])
-                t = mp.Thread(target=g.run)
-                t.start()
-                del rooms[room]
-                del confs[room]
-                if observers[room]:
-                    del observers[room]
-                games[room] = g
+class SeatingListener:
+    def __init__(self):
+        self.config = yaml.safe_load(open("server-conf.yml", "r"))
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+        self.channel = connection.channel()
+        self.channel.queue_declare(queue=self.config['code'])
+        self.channel.basic_consume(queue=self.config['code'], on_message_callback=self.callback, auto_ack=True)
+        self.connected_players = []
+        self.channel.start_consuming()
 
-main()
+    def callback(self, ch, method, proerties, body):
+        mess = json.loads(body)
+        nick = mess['nick']
+        nick = re.sub('[^A-Za-z0-9_-]+', '-', nick)[:16]
+        conf = mess['config']
+        spectate = mess["spectate"]
+        self.connected_players.append(Human(nick))
+        if len(self.connected_players) >= self.config['number_seats']:
+            g = Game(self.connected_players, self.config['code'], self.channel, conf)
+            g.run()
+            self.channel.stop_consuming()
+
+sl = SeatingListener()
