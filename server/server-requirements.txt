@@ -3,4 +3,5 @@ pyYAML
 pika
 flask
 pyjwt
+passlib
 requests

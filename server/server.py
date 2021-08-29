@@ -7,16 +7,14 @@ from deuces import Card, evaluator
 import os
 from math import floor
 import struct
-from copy import deepcopy
 import queue
 import select
 from pymongo import MongoClient
 import datetime
-import re
+import requests
+import threading
 import ssl
-import yaml
 import pika
-
 
 
 
@@ -76,31 +74,24 @@ class Player:
         self.amount_bet = gamehand.max_amount_bet
 
 
-
 class Human(Player):
-    def __init__(self, nick, conn):
+    def __init__(self, nick, queue_id):
         super().__init__()
         self.nick = nick
-        self.conn = conn
-        self.disconnected = False
+        self.queue_id = queue_id
+        self.disconnected = True
         self.action_queue = queue.Queue()
 
     def act(self, gamehand):
+
         if self.disconnected:
             action = 'f'
         else:
-            ready = select.select([self.conn], [], [], gamehand.timeout)
-            if ready[0]:
-                try:
-                    action = self.conn.recv(4096).decode('utf-8').strip()
-                    if action == '':
-                        action = 'f'
-                        self.disconnected = True
-                except (ConnectionError, OSError, ssl.SSLError):
-                    action = 'f'
-                    self.disconnected = True
-            else:
+            try:
+                action = self.action_queue.get(timeout=gamehand.timeout).decode('utf-8').strip()
+            except queue.Empty:
                 action = 'f'
+                self.disconnected = True
 
         if action.lower() == 'c':
             amount_called = min(gamehand.max_amount_bet - self.amount_bet, self.chips)
@@ -125,6 +116,12 @@ class Human(Player):
             gamehand.hand_document['actions'][gamehand.street_act].append({'code': 'F',
                                                                 'player': self.nick})
             gamehand.last_action = 'fold'
+
+    def read_queue(self, channel):
+        channel.basic_consume(queue='game.' + self.queue_id, on_message_callback=self.put_action, auto_ack=True)
+
+    def put_action(self, ch, method, properties, body):
+        self.action_queue.put(body)
 
 
 class GameHand:
@@ -268,14 +265,14 @@ class GameHand:
                     min_raise = self.min_raise + self.max_amount_bet - player.amount_bet
                 min_raise = min(min_raise, player.chips)
                 to_call = min(self.max_amount_bet - player.amount_bet, player.chips)
-                private[player.nick] = {'to_call': to_call,
-                                        'min_raise': min_raise,
-                                        'nl_raise': bool(self.flop1),
-                                        'holes':''.join(Card.int_to_str(c) for c in player.hand)
-                                        }
+                private[player.queue_id] = {'to_call': to_call,
+                                            'min_raise': min_raise,
+                                            'nl_raise': bool(self.flop1),
+                                            'holes': ''.join(Card.int_to_str(c) for c in player.hand)
+                                            }
         self.game.broadcast(common)
-        for p, v in private.items():
-            self.game.player_send(p, v)
+        for p_id, v in private.items():
+            self.game.send_player(p_id, v)
 
     def deal_flop(self):
         if len(self.players) == 2:
@@ -361,9 +358,22 @@ class Game:
         self.server_config = server_config
         start = {'start': True, 'players': [p.nick for p in players]}
         self.channel = channel
+        channel.queue_declare('public', exclusive=True, auto_delete=True)
+        channel.queue_bind(exchange='poker_exchange',
+                           queue='public',
+                           routing_key='public')
         for p in players:
             p.chips = server_config['start_chips']
-            channel.queue_declare(queue=code + '.' + p.nick)
+            channel.queue_declare('player' + '.' + p.queue_id, exclusive=True, auto_delete=True)
+            channel.queue_bind(exchange='poker_exchange',
+                               queue='player.' + p.queue_id,
+                               routing_key='player' + '.' + p.queue_id)
+            channel.queue_declare('game' + '.' + p.queue_id, exclusive=True, auto_delete=True)
+            channel.queue_bind(exchange='poker_exchange',
+                               queue='game.' + p.queue_id,
+                               routing_key='game.' + p.queue_id)
+            rabbit_consumer = threading.Thread(target=p.read_queue, args=(channel,))
+            rabbit_consumer.start()
         self.broadcast(start)
 
         self.start_time = datetime.datetime.utcnow()
@@ -376,13 +386,13 @@ class Game:
         self.blind_augment = self.start_time
 
     def broadcast(self, msg):
-        self.channel.basic_publish(exchange='',
-                                   routing_key=self.code,
+        self.channel.basic_publish(exchange='poker_exchange',
+                                   routing_key='public',
                                    body=json.dumps(msg).encode('utf-8'))
 
-    def send_player(self, p, msg):
-        self.channel.basic_publish(exchange='',
-                                   routing_key=self.code + '.' + p.nick,
+    def send_player(self, p_id, msg):
+        self.channel.basic_publish(exchange='poker_exchange',
+                                   routing_key='player.'+p_id,
                                    body=json.dumps(msg).encode('utf-8'))
 
     def check_eliminated(self):
@@ -399,6 +409,7 @@ class Game:
 
     def run(self):
         nb_hands = 0
+
         while len(self.players) > 1:
             nb_hands += 1
             deck = Deck()
@@ -415,7 +426,7 @@ class Game:
                     player.chips = player.chips - decrease
                     if not player.disconnected:
                         message = f'You were removed {decrease} chips'
-                        self.send_player(player, {'log': message})
+                        self.send_player(player.queue_id, {'log': message})
             self.check_eliminated()
             hand = GameHand(self.players, self, deck, self.mongo_db, self.tourney_id)
             if len(self.players) <= 1:
@@ -472,25 +483,32 @@ class Game:
 
 
 class SeatingListener:
-    def __init__(self):
-        self.config = yaml.safe_load(open("server-conf.yml", "r"))
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    def __init__(self, game_config, players):
+        rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
+        credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', credentials=credentials))
+        self.game_config = game_config
+        self.code = str(os.getpid())
+
+        requests.put(f'http://localhost:15672/api/vhosts/{self.code}',
+                     auth=('admin', rabbitmq_admin_password))
+        for p in players:
+            requests.put(f'http://localhost:15672/api/permissions/{self.code}/{p["_id"]}',
+                         auth=('admin', rabbitmq_admin_password),
+                         data={"configure": "", "write": f'poker_exchange', "read": f'poker_exchange'})
+            requests.put(f'http://localhost:15672/api/topic_permissions/{self.code}/{p["_id"]}',
+                         auth=('admin', rabbitmq_admin_password),
+                         data={"exchange": "poker_exchange",
+                               "write": f'game.{p["_id"]}',
+                               "read": f'public|player.{p["_id"]}'})
+
         self.channel = connection.channel()
-        self.channel.queue_declare(queue=self.config['code'])
-        self.channel.basic_consume(queue=self.config['code'], on_message_callback=self.callback, auto_ack=True)
-        self.connected_players = []
-        self.channel.start_consuming()
+        self.channel.exchange_declare(exchange='poker_exchange', exchange_type='topic')
 
-    def callback(self, ch, method, proerties, body):
-        mess = json.loads(body)
-        nick = mess['nick']
-        nick = re.sub('[^A-Za-z0-9_-]+', '-', nick)[:16]
-        conf = mess['config']
-        spectate = mess["spectate"]
-        self.connected_players.append(Human(nick))
-        if len(self.connected_players) >= self.config['number_seats']:
-            g = Game(self.connected_players, self.config['code'], self.channel, conf)
-            g.run()
-            self.channel.stop_consuming()
-
-sl = SeatingListener()
+        self.players = [Human(p['login'], str(p['_id'])) for p in players]
+        g = Game(self.players, self.code, self.channel, self.game_config)
+        # TODO: transform this in sleep(t1 - t0)
+        while datetime.datetime.utcnow() <= datetime.datetime.utcfromtimestamp(self.game_config['start_time']):
+            time.sleep(1)
+        g.run()
+        requests.delete(f'http://localhost:15672/api/vhosts/{self.code}', auth=('admin', rabbitmq_admin_password))

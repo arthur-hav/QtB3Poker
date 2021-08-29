@@ -1,13 +1,13 @@
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import Qt, QRect, QObject, pyqtSignal, QThread, QMutex
-from PyQt5.QtGui import QPixmap, QFont, QIntValidator, QDoubleValidator, QWindow
+from PyQt5.QtGui import QPixmap, QFont, QIntValidator, QDoubleValidator
 from PyQt5.QtMultimedia import QSound
 import sentry_sdk
 from tutorial import Tutorial
 import time
-import ssl
 import random
 import yaml
+import pika
 
 
 sentry_sdk.init(
@@ -18,9 +18,7 @@ sentry_sdk.init(
     # We recommend adjusting this value in production.
     traces_sample_rate=0.8
 )
-import socket
 import json
-import select
 import re
 
 players_layout_6m = [
@@ -63,36 +61,27 @@ class PokerTimer(QObject):
             self.timer_sig.emit()
             time.sleep(0.5)
 
-class MainListener(QObject):
+class PublicListener(QObject):
     gamestate = pyqtSignal(dict)
 
-    def __init__(self, conn):
+    def __init__(self, channel, player_id):
         super().__init__()
         self.data = b''
         self.done = False
         self.messages = []
-        self.socket = conn
+        self.channel = channel
+        self.player_id = player_id
 
     def run_main(self):
-        while not self.done:
-            while self.messages:
-                self.gamestate.emit(json.loads(self.messages.pop(0)))
-            ready = select.select([self.socket], [], [], 0.1)
-            if ready[0]:
-                try:
-                    self.messages = self.socket.recv(4096).decode('utf-8').strip().split('\n')
-                    if self.messages == ['']:
-                        break
-                except ssl.SSLWantReadError:
-                    continue
-                except (OSError, ssl.SSLError):
-                    self.done = True
-            if self.data:
-                self.socket.send(self.data)
-                self.data = b''
-        self.socket.close()
+        self.channel.queue_declare('incoming')
+        self.channel.queue_bind(exchange='poker_exchange',
+                                queue='incoming',
+                                routing_key='game')
+        self.channel.basic_consume()
+        # read msg, emit gamestate
 
-
+    def callback(self, ch, method, properties, body):
+        self.gamestate.emit(body)
 
 class Listener(QObject):
     pkr_connect = pyqtSignal(str)
@@ -107,7 +96,6 @@ class Listener(QObject):
         listener.server = server
         listener.nickname = nickname
         listener.room_code = code
-        listener.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.host = True
         return listener
 
@@ -119,16 +107,11 @@ class Listener(QObject):
         listener.server = server
         listener.nickname = nickname
         listener.room_code = code
-        listener.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.host = False
         return listener
 
     def run_connect(self):
-        self.socket.connect(self.server)
-        if self.use_ssl:
-            context = ssl.create_default_context()
-            self.socket = context.wrap_socket(self.socket, server_hostname=self.server[0])
-        self.socket.setblocking(False)
+        #send msg
         connect_data = {'nick': self.nickname, "spectate": self.spectate_only, 'room_code': self.room_code}
         if self.host:
             connect_data['config'] = self.server_config
@@ -136,14 +119,7 @@ class Listener(QObject):
         self.pkr_connect.emit(self.nickname)
 
     def run_start(self):
-        while True:
-            ready = select.select([self.socket], [], [], 0.1)
-            if ready[0]:
-                try:
-                    self.messages = self.socket.recv(4096).decode('utf-8').strip().split('\n')
-                    break
-                except ssl.SSLWantReadError:
-                    continue
+        # read msg
         self.pkr_start.emit(json.loads(self.messages.pop(0)))
 
 
@@ -740,7 +716,10 @@ class Game(QObject):
     def on_start(self, startstate):
         self.poker_table.setStart(startstate)
         self.poker_timer_thread.start()
-        self.main_listener = MainListener(self.net_listener.socket)
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+        channel = connection.channel()
+        self.public_listener = PublicListener(channel)
+        self.private_listener = PrivateListener(channel)
         self.main_listener.moveToThread(self.listener_thread)
         self.main_listener.gamestate.connect(self.on_recv)
         self.listener_thread.started.connect(self.main_listener.run_main)
@@ -835,5 +814,6 @@ def main():
     mw = MainWindow(config)
     mw.show()
     app.exec_()
+
 
 main()
