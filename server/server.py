@@ -8,14 +8,13 @@ import os
 from math import floor
 import struct
 import queue
-import select
 from pymongo import MongoClient
 import datetime
 import requests
 import threading
-import ssl
+from cryptography.fernet import Fernet
 import pika
-
+from base64 import b64encode
 
 
 def urand():
@@ -52,6 +51,7 @@ class Player:
         self.is_folded = False
         self.acted_street = False
         self.chips = 0
+        self.key = None
 
     def deal(self, deck):
         self.hand = [deck.pop(), deck.pop(), deck.pop()]
@@ -91,7 +91,7 @@ class Human(Player):
                 action = self.action_queue.get(timeout=gamehand.timeout).decode('utf-8').strip()
             except queue.Empty:
                 action = 'f'
-                self.disconnected = True
+                # self.disconnected = True
 
         if action.lower() == 'c':
             amount_called = min(gamehand.max_amount_bet - self.amount_bet, self.chips)
@@ -117,8 +117,16 @@ class Human(Player):
                                                                 'player': self.nick})
             gamehand.last_action = 'fold'
 
-    def read_queue(self, channel):
+    def read_queue(self, code, credentials):
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, code,
+                                                          credentials=credentials))
+        channel = connection.channel()
+        channel.queue_declare('game' + '.' + self.queue_id, auto_delete=True)
+        channel.queue_bind(exchange='poker_exchange',
+                           queue='game.' + self.queue_id,
+                           routing_key='game.' + self.queue_id)
         channel.basic_consume(queue='game.' + self.queue_id, on_message_callback=self.put_action, auto_ack=True)
+        channel.start_consuming()
 
     def put_action(self, ch, method, properties, body):
         self.action_queue.put(body)
@@ -354,36 +362,33 @@ class GameHand:
 
 
 class Game:
-    def __init__(self, players, code, channel, server_config):
+    def __init__(self, players, code, credentials, server_config):
+        self.connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, code,
+                                                                            credentials=credentials))
         self.server_config = server_config
-        start = {'start': True, 'players': [p.nick for p in players]}
-        self.channel = channel
-        channel.queue_declare('public', exclusive=True, auto_delete=True)
-        channel.queue_bind(exchange='poker_exchange',
-                           queue='public',
-                           routing_key='public')
-        for p in players:
-            p.chips = server_config['start_chips']
-            channel.queue_declare('player' + '.' + p.queue_id, exclusive=True, auto_delete=True)
-            channel.queue_bind(exchange='poker_exchange',
-                               queue='player.' + p.queue_id,
-                               routing_key='player' + '.' + p.queue_id)
-            channel.queue_declare('game' + '.' + p.queue_id, exclusive=True, auto_delete=True)
-            channel.queue_bind(exchange='poker_exchange',
-                               queue='game.' + p.queue_id,
-                               routing_key='game.' + p.queue_id)
-            rabbit_consumer = threading.Thread(target=p.read_queue, args=(channel,))
-            rabbit_consumer.start()
-        self.broadcast(start)
-
         self.start_time = datetime.datetime.utcnow()
         self.players = players
         self.code = code
         self.mongo_conn = MongoClient()
         self.mongo_db = self.mongo_conn.bordeaux_poker_db
         self.tourney_id = self.mongo_db.tourneys.insert_one({'placements': {},
+                                                             'players': [p.queue_id for p in players],
+                                                             'game': os.getpid(),
                                                              'date': self.start_time}).inserted_id
         self.blind_augment = self.start_time
+        self.channel = self.connection.channel()
+        self.channel.exchange_declare(exchange='poker_exchange', exchange_type='topic')
+        self.channel.queue_declare('public', auto_delete=True)
+        self.channel.queue_bind(exchange='poker_exchange',
+                           queue='public',
+                           routing_key='public')
+        rabbit_consumer = threading.Thread(target=self.read_keys)
+        rabbit_consumer.start()
+        for p in players:
+            p.chips = server_config['start_chips']
+
+            rabbit_consumer = threading.Thread(target=p.read_queue, args=(code, credentials,))
+            rabbit_consumer.start()
 
     def broadcast(self, msg):
         self.channel.basic_publish(exchange='poker_exchange',
@@ -391,9 +396,36 @@ class Game:
                                    body=json.dumps(msg).encode('utf-8'))
 
     def send_player(self, p_id, msg):
-        self.channel.basic_publish(exchange='poker_exchange',
-                                   routing_key='player.'+p_id,
-                                   body=json.dumps(msg).encode('utf-8'))
+        for p in self.players:
+            if p.queue_id == p_id:
+                if not p.key:
+                    return
+                self.channel.basic_publish(exchange='poker_exchange',
+                                           routing_key='public',
+                                           body=json.dumps({'private_to': p_id,
+                                                            'data': b64encode(p.key.encrypt(json.dumps(msg).encode('utf-8'))).decode('utf-8')}))
+
+    def read_keys(self):
+        rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
+        credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', credentials=credentials))
+        channel = connection.channel()
+        channel.queue_declare('keys-' + self.code, exclusive=True, auto_delete=True)
+        channel.exchange_declare(exchange='poker_exchange', exchange_type='topic')
+        channel.queue_bind(exchange='poker_exchange',
+                           queue='keys-' + self.code,
+                           routing_key='keys')
+        channel.basic_consume(queue='keys-' + self.code,
+                              on_message_callback=self.connect_player,
+                              auto_ack=True)
+        channel.start_consuming()
+
+    def connect_player(self, ch, method, properties, body):
+        key_dict = json.loads(body.decode('utf-8'))
+        for player in self.players:
+            if player.queue_id == key_dict['id']:
+                player.disconnected = False
+                player.key = Fernet(key_dict['key'])
 
     def check_eliminated(self):
         eliminated_players = [p for p in self.players if p.chips <= 0]
@@ -484,31 +516,28 @@ class Game:
 
 class SeatingListener:
     def __init__(self, game_config, players):
-        rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
-        credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', credentials=credentials))
         self.game_config = game_config
         self.code = str(os.getpid())
-
+        rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
         requests.put(f'http://localhost:15672/api/vhosts/{self.code}',
                      auth=('admin', rabbitmq_admin_password))
+        requests.put(f'http://localhost:15672/api/permissions/{self.code}/admin',
+                     auth=('admin', rabbitmq_admin_password),
+                     data=json.dumps({"configure": ".*", "write": '.*', "read": '.*'}))
+
         for p in players:
             requests.put(f'http://localhost:15672/api/permissions/{self.code}/{p["_id"]}',
                          auth=('admin', rabbitmq_admin_password),
-                         data={"configure": "", "write": f'poker_exchange', "read": f'poker_exchange'})
-            requests.put(f'http://localhost:15672/api/topic_permissions/{self.code}/{p["_id"]}',
+                         data=json.dumps({"configure": ".*", "write": '.*', "read": '.*'}))
+            requests.put(f'http://localhost:15672/api/topic-permissions/{self.code}/{p["_id"]}',
                          auth=('admin', rabbitmq_admin_password),
-                         data={"exchange": "poker_exchange",
-                               "write": f'game.{p["_id"]}',
-                               "read": f'public|player.{p["_id"]}'})
+                         data=json.dumps({"exchange": "poker_exchange",
+                                          "write": f'game.{p["_id"]}',
+                                          "read": 'public'}))
 
-        self.channel = connection.channel()
-        self.channel.exchange_declare(exchange='poker_exchange', exchange_type='topic')
+        credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
 
         self.players = [Human(p['login'], str(p['_id'])) for p in players]
-        g = Game(self.players, self.code, self.channel, self.game_config)
-        # TODO: transform this in sleep(t1 - t0)
-        while datetime.datetime.utcnow() <= datetime.datetime.utcfromtimestamp(self.game_config['start_time']):
-            time.sleep(1)
+        g = Game(self.players, self.code, credentials, self.game_config)
         g.run()
         requests.delete(f'http://localhost:15672/api/vhosts/{self.code}', auth=('admin', rabbitmq_admin_password))

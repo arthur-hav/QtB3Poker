@@ -1,3 +1,4 @@
 pyQt5
 sentry_sdk
 pyYAML
+pika

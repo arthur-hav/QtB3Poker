@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, g
 import requests
 import jwt
 import json
@@ -8,6 +8,10 @@ import os
 from pymongo import MongoClient
 import multiprocessing as mp
 from .server import SeatingListener
+from base64 import b64encode
+import pika
+from collections import defaultdict
+from cryptography.fernet import Fernet
 
 
 def token_required(f):
@@ -26,7 +30,10 @@ if __name__ == '__main__':
 app = Flask(__name__)
 
 
-@app.route("/get_token", methods=["GET"])
+def rand_key():
+    return Fernet.generate_key()
+
+
 def get_token(user_id):
     secret_key = os.getenv('JWT_TOKEN', 'unsafe_for_production')
 
@@ -54,8 +61,8 @@ def register():
     rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
     requests.put(f'http://localhost:15672/api/users/{user_id}',
                  auth=('admin', rabbitmq_admin_password),
-                 data={"password": request.form['password'], "tags": ""})
-    return {'status': 'success', 'data': user_id}
+                 data=json.dumps({"password": request.form['password'], "tags": ""}))
+    return {'status': 'success', 'user_id': user_id}
 
 
 @app.route('/login', methods=['POST'])
@@ -64,8 +71,23 @@ def login():
     pmc = MongoClient()
     db = pmc.bordeaux_poker_db
     user = db.users.find_one({'login': user})
+    key = rand_key()
     if sha256_crypt.verify(request.form['password'], user['pass_hash']):
-        return {'status': 'success', 'data': get_token(user['_id']).decode('utf-8')}
+        rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
+        credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', credentials=credentials))
+        channel = connection.channel()
+        channel.exchange_declare('poker_exchange', 'topic')
+        channel.basic_publish(exchange='poker_exchange',
+                              routing_key='keys',
+                              # TODO: Cypher api/server
+                              body=json.dumps({'id': str(user['_id']), 'key': key.decode('utf-8')}).encode('utf-8'))
+        games = list(db.tourneys.find({'players': {'$in': [str(user['_id'])]}, 'game': {'$exists': True}}))
+        return {'status': 'success',
+                'token': get_token(user['_id']).decode('utf-8'),
+                'key': key.decode('utf-8'),
+                'id': str(user['_id']),
+                'games': [g['game'] for g in games if request.form['user'] not in g['placements']]}
     return {'status': 'fail', 'reason': 'Bad username or password'}
 
 
@@ -77,7 +99,16 @@ def create_game(user_id):
     pmc = MongoClient()
     db = pmc.bordeaux_poker_db
     users = list(db.users.find({'login': {'$in': players_login}}))
-    #p = mp.Process(target=server.SeatingListener, args=(game_config, users))
-    #p.start()
-    server.SeatingListener(game_config, users)
-    return {'status': 'success', 'code': p.pid}
+    p = mp.Process(target=server.SeatingListener, args=(game_config, users))
+    p.start()
+    for u in users:
+        u_id = str(u['_id'])
+        lst_dict = getattr(g, 'game_users', defaultdict(list))
+        lst_dict[u_id].append(p.pid)
+        g.game_users = lst_dict
+    return {'status': 'success', 'server_id': p.pid}
+
+
+@app.route("/end_game", methods=['POST'])
+def end_game():
+    pass

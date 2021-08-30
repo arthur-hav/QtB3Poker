@@ -3,10 +3,13 @@ import pika, sys, os
 
 
 def main():
-    connection = pika.BlockingConnection(pika.ConnectionParameters(host='localhost'))
+    rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
+    credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
+    connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', credentials=credentials))
     channel = connection.channel()
 
     channel.queue_declare(queue='hello')
+    channel.queue_bind('hello', 'poker_exchange', 'keys')
 
     def callback(ch, method, properties, body):
         print(" [x] Received %r" % body)

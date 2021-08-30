@@ -8,18 +8,14 @@ import time
 import random
 import yaml
 import pika
-
-
-sentry_sdk.init(
-    "https://bcdfdee5d8864d408aae8249eff6edc5@o968644.ingest.sentry.io/5919963",
-
-    # Set traces_sample_rate to 1.0 to capture 100%
-    # of transactions for performance monitoring.
-    # We recommend adjusting this value in production.
-    traces_sample_rate=0.8
-)
+import requests
+from cryptography.fernet import Fernet
 import json
-import re
+import base64
+
+
+sentry_sdk.init("https://bcdfdee5d8864d408aae8249eff6edc5@o968644.ingest.sentry.io/5919963")
+
 
 players_layout_6m = [
     ((400, 480), (300, 450)),
@@ -61,66 +57,31 @@ class PokerTimer(QObject):
             self.timer_sig.emit()
             time.sleep(0.5)
 
-class PublicListener(QObject):
-    gamestate = pyqtSignal(dict)
-
-    def __init__(self, channel, player_id):
-        super().__init__()
-        self.data = b''
-        self.done = False
-        self.messages = []
-        self.channel = channel
-        self.player_id = player_id
-
-    def run_main(self):
-        self.channel.queue_declare('incoming')
-        self.channel.queue_bind(exchange='poker_exchange',
-                                queue='incoming',
-                                routing_key='game')
-        self.channel.basic_consume()
-        # read msg, emit gamestate
-
-    def callback(self, ch, method, properties, body):
-        self.gamestate.emit(body)
 
 class Listener(QObject):
-    pkr_connect = pyqtSignal(str)
-    pkr_start = pyqtSignal(dict)
+    gamestate = pyqtSignal(dict)
+    private = pyqtSignal(dict)
 
-    @classmethod
-    def from_host(cls, server, nickname, code, use_ssl, spectate_only, server_config):
-        listener = Listener()
-        listener.use_ssl = use_ssl
-        listener.spectate_only = spectate_only
-        listener.server_config = server_config
-        listener.server = server
-        listener.nickname = nickname
-        listener.room_code = code
-        listener.host = True
-        return listener
+    def __init__(self, channel, player_id, key):
+        super().__init__()
+        self.channel = channel
+        self.key = key
+        self.player_id = player_id
 
-    @classmethod
-    def from_code(cls, server, nickname, code, use_ssl, spectate_only):
-        listener = Listener()
-        listener.use_ssl = use_ssl
-        listener.spectate_only = spectate_only
-        listener.server = server
-        listener.nickname = nickname
-        listener.room_code = code
-        listener.host = False
-        return listener
+    def run(self):
+        self.channel.basic_consume(f'public.{self.player_id}', on_message_callback=self.callback, auto_ack=True)
+        self.channel.start_consuming()
 
-    def run_connect(self):
-        #send msg
-        connect_data = {'nick': self.nickname, "spectate": self.spectate_only, 'room_code': self.room_code}
-        if self.host:
-            connect_data['config'] = self.server_config
-        self.socket.send(json.dumps(connect_data).encode('utf-8'))
-        self.pkr_connect.emit(self.nickname)
+    def callback(self, ch, method, properties, body):
+        body = json.loads(body.decode('utf-8'))
+        if 'private_to' in body:
+            if body['private_to'] == self.player_id:
+                self.private.emit(json.loads(Fernet(self.key.encode('utf-8')).decrypt(base64.b64decode(body['data'].encode('utf-8'))).decode('utf-8')))
+        else:
+            self.gamestate.emit(body)
 
-    def run_start(self):
-        # read msg
-        self.pkr_start.emit(json.loads(self.messages.pop(0)))
+    def stop(self):
+        self.channel.stop_consuming()
 
 
 class Board(QWidget):
@@ -216,37 +177,59 @@ class HostRoomTab(QWidget):
 
 
 class MainConnectWindow(QWidget):
-    def __init__(self, set_tutorial, default_nickname, default_server, host_defaults):
+    press_tutorial = pyqtSignal()
+
+    def __init__(self, default_nickname, default_server, host_defaults):
         super().__init__()
         layout = QVBoxLayout()
-        self.top_window = TopConnectWindow(set_tutorial, default_nickname, default_server)
+
+        self.tutorial_btn = QPushButton()
+        self.tutorial_btn.setText("Tutorial (FR)")
+        layout.addWidget(self.tutorial_btn)
+        self.tutorial_btn.pressed.connect(self.press_tutorial.emit)
+
+        self.top_window = TopConnectWindow(default_nickname, default_server)
         layout.addWidget(self.top_window)
+
         self.connect_option_tabs = QTabWidget()
         self.connect_room_tab = ConnectRoomTab()
         self.host_room_tab = HostRoomTab(host_defaults)
-        self.connect_option_tabs.addTab(self.connect_room_tab, 'Connect room')
+        self.connect_option_tabs.addTab(self.connect_room_tab, 'Join room')
         self.connect_option_tabs.addTab(self.host_room_tab, 'Host room')
         layout.addWidget(self.connect_option_tabs)
+        self.connect_option_tabs.hide()
         self.setLayout(layout)
 
 
 class TopConnectWindow(QWidget):
-    def __init__(self, set_tutorial, default_nickname, default_server):
+    login_success = pyqtSignal(str, str, list, str, str)
+
+    def __init__(self, default_nickname, default_server):
         super().__init__()
         layout = QFormLayout()
         self.setLayout(layout)
-        self.tutorial_btn = QPushButton()
-        self.tutorial_btn.setText("Tutorial (FR)")
-        layout.addRow(self.tutorial_btn)
-        self.tutorial_btn.pressed.connect(set_tutorial)
         self.nickname = QLineEdit()
         self.nickname.setText(default_nickname)
         layout.addRow(QLabel("Your nickname"), self.nickname)
-        self.ip_text = QLineEdit()
-        self.ip_text.setText(default_server)
-        layout.addRow(QLabel("Server name"), self.ip_text)
-        self.spectate = QCheckBox()
-        layout.addRow(QLabel("Spectate only"), self.spectate)
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.Password)
+        layout.addRow(QLabel("Password"), self.password)
+        self.fqdn = QLineEdit()
+        self.fqdn.setText(default_server)
+        layout.addRow(QLabel("Server name"), self.fqdn)
+        self.login = QPushButton()
+        self.login.setText('Login')
+        self.login.pressed.connect(self.login_request)
+        layout.addRow(self.login)
+
+    def login_request(self):
+        user = self.nickname.text()
+        password = self.password.text()
+        response = requests.post(f'https://{self.fqdn.text()}/login', data={'user': user, 'password': password})
+        resp_data = response.json()
+        if 'status' in resp_data and resp_data['status'] == 'success':
+            self.login_success.emit(resp_data['token'], resp_data['key'],
+                                    resp_data['games'], resp_data['id'], password)
 
 
 class BetAmountWidget(QWidget):
@@ -589,7 +572,7 @@ class PokerTableWidget(QWidget):
                     p.is_folded = p_dict['is_folded']
                     if p_dict.get('holes'):
                         p.setHoles([p_dict['holes'][0:2], p_dict['holes'][2:4], p_dict['holes'][4:]])
-                    else:
+                    elif p.nickname != self.nickname:
                         p.setHoles([])
                     p.alive = True
         for p in self.players:
@@ -602,8 +585,7 @@ class PokerTableWidget(QWidget):
         sound = QSound(f'sounds/{last_action}.wav')
         sound.play(f'sounds/{last_action}.wav')
 
-    def setStart(self, startstate):
-        nicks = [str(p) for p in startstate['players']]
+    def startup_table(self, nicks):
         if self.spectate_only:
             rotated_nicks = nicks
         else:
@@ -653,77 +635,50 @@ class PokerTableWidget(QWidget):
 
 
 class Game(QObject):
-    def __init__(self, nickname, ip_text, port, use_ssl, spectate_only, room_tab):
+    def __init__(self, nickname, channel, spectate_only, user_id, key):
         super().__init__()
         self.nickname = nickname
+        self.user_id = user_id
+        self.started = False
         self.spectate_only = spectate_only
-        self.poker_table = None
-        self.starter_thread = QThread()
+        self.poker_table = PokerTableWidget(nickname, spectate_only)
+        self.channel = channel
         self.listener_thread = QThread()
-        self.room_tab = room_tab
-        self.server = ip_text, port
-        self.use_ssl = use_ssl
+        self.listener = Listener(channel, user_id, key)
+        self.listener.moveToThread(self.listener_thread)
+        self.listener.gamestate.connect(self.on_recv)
+        self.listener.private.connect(self.on_recv_private)
+        self.listener_thread.started.connect(self.listener.run)
         self.timer_mutex = QMutex()
         self.poker_timer = PokerTimer()
         self.poker_timer_thread = QThread()
         self.poker_timer.moveToThread(self.poker_timer_thread)
         self.poker_timer_thread.started.connect(self.poker_timer.run)
         self.poker_timer.timer_sig.connect(self.decrease_timer)
+        self.listener_thread.start()
 
-    def host_connect(self):
+    def create_game(self):
+        # TODO
         server_config = {'start_chips': int(self.room_tab.start_chips.text()),
                          'blind_timer': int(self.room_tab.blind_timer.text()),
                          'blind_percent': float(self.room_tab.blind_percent.text()),
                          'skim_percent': float(self.room_tab.skim_percent.text()),
                          'number_seats': int(self.room_tab.number_seats.text())}
-        self.try_connect(self.room_tab.room_code.text(), Listener.from_host, server_config=server_config)
-
-    def guest_connect(self):
-        self.try_connect(self.room_tab.room_code.text(), Listener.from_code)
-
-    def try_connect(self, room_code, method, **kwargs):
-        slug_nickname = re.sub('[^A-Za-z0-9_-]+', '-', self.nickname)[:16]
-        self.net_listener = method(self.server,
-                                   slug_nickname,
-                                   room_code,
-                                   self.use_ssl,
-                                   self.spectate_only,
-                                   **kwargs)
-        self.net_listener.moveToThread(self.starter_thread)
-        self.starter_thread.started.connect(self.net_listener.run_connect)
-        self.net_listener.pkr_connect.connect(self.on_connect)
-        self.net_listener.pkr_connect.connect(self.net_listener.run_start)
-        self.net_listener.pkr_start.connect(self.on_start)
-        self.starter_thread.start()
-
-    def on_connect(self, nickname):
-        self.poker_table = PokerTableWidget(nickname, self.spectate_only)
-        self.poker_table.bet_actions.call.pressed.connect(self.call_btn)
-        self.poker_table.bet_actions.fold.pressed.connect(self.fold_btn)
-        self.poker_table.bet_actions.bet.pressed.connect(self.bet_btn)
-        self.poker_table.die.connect(self.done)
-        self.poker_table.show()
 
     def call_btn(self):
-        self.main_listener.data = b'c'
+        self.channel.basic_publish(exchange='poker_exchange',
+                                   routing_key=f'game.{self.user_id}',
+                                   body=b'c')
 
     def fold_btn(self):
-        self.main_listener.data = b'f'
+        self.channel.basic_publish(exchange='poker_exchange',
+                                   routing_key=f'game.{self.user_id}',
+                                   body=b'f')
 
     def bet_btn(self):
-        self.main_listener.data = f'r {self.poker_table.bet_actions.raise_group.raise_size}'.encode('utf-8')
-
-    def on_start(self, startstate):
-        self.poker_table.setStart(startstate)
-        self.poker_timer_thread.start()
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-        channel = connection.channel()
-        self.public_listener = PublicListener(channel)
-        self.private_listener = PrivateListener(channel)
-        self.main_listener.moveToThread(self.listener_thread)
-        self.main_listener.gamestate.connect(self.on_recv)
-        self.listener_thread.started.connect(self.main_listener.run_main)
-        self.listener_thread.start()
+        self.channel.basic_publish(exchange='poker_exchange',
+                                   routing_key=f'game.{self.user_id}',
+                                   body=f'r {self.poker_table.bet_actions.raise_group.raise_size}'.encode('utf-8'))
 
     def decrease_timer(self):
         for player in self.poker_table.players:
@@ -734,6 +689,10 @@ class Game(QObject):
                 player.timer.repaint()
 
     def on_recv(self, gamestate):
+        if not self.started:
+            self.poker_table.show()
+            self.poker_table.startup_table([p['name'] for p in gamestate.get('players')])
+            self.started = True
         if 'finished' in gamestate:
             self.poker_table.event_log.push_message(f"You finished place {gamestate['finished']}")
             return
@@ -744,15 +703,20 @@ class Game(QObject):
         self.poker_table.setBoard(gamestate.get('board'))
         self.poker_table.setPlayers(gamestate.get('players'))
         self.poker_table.setPotSize(gamestate.get('pot'), gamestate.get('prev_pot'))
-        self.poker_table.setRaiseSize(gamestate.get('min_raise'), gamestate.get('nl_raise'))
-        self.poker_table.setToCall(gamestate.get('to_call'))
         self.poker_table.setActive(gamestate.get('active'))
         self.poker_table.setWinningHand(gamestate.get('winning_hand', ''))
         self.poker_table.playSounds(gamestate.get('last_action'))
         self.timer_mutex.unlock()
 
+    def on_recv_private(self, gamestate):
+        print(gamestate)
+        self.poker_table.setToCall(gamestate.get('to_call'))
+        self.poker_table.setRaiseSize(gamestate.get('min_raise'), gamestate.get('nl_raise'))
+        if 'holes' in gamestate:
+            self.poker_table.players[0].setHoles([gamestate['holes'][0:2], gamestate['holes'][2:4], gamestate['holes'][4:]])
+
     def done(self):
-        self.main_listener.done = True
+        self.listener.stop()
         self.poker_timer.done = True
 
 
@@ -762,7 +726,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.setWindowTitle('Bordeaux 3')
-        self._init_connect()
+        self.connect_window = MainConnectWindow(self.config["nickname"],
+                                                self.config["server"],
+                                                self.config['room_host_defaults'])
+        self.connect_window.top_window.login_success.connect(self.show_options)
+        self.connect_window.press_tutorial.connect(self.set_tutorial)
+        self.connect_window.setFixedSize(600, 400)
+        self.setCentralWidget(self.connect_window)
         self.adjustSize()
         self.net_listener = None
         self.poker_timer = None
@@ -776,36 +746,40 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.connect_window)
         self.adjustSize()
 
-    def _init_connect(self):
-        self.connect_window = MainConnectWindow(self.set_tutorial, self.config["nickname"],
-                                                self.config["server"], self.config["room_host_defaults"])
-        self.connect_window.setFixedSize(600, 400)
-        self.connect_window.connect_room_tab.connect_btn.pressed.connect(self.guest_connect)
-        self.connect_window.host_room_tab.connect_btn.pressed.connect(self.host_connect)
-        self.setCentralWidget(self.connect_window)
-        self.adjustSize()
+    def show_options(self, token, key, games, user_id, password):
+        self.token = token
+        print(token)
+        nickname = self.connect_window.top_window.nickname.text()
+        self.connect_window.top_window.hide()
+        self.connect_window.connect_option_tabs.show()
+        auth = pika.PlainCredentials(user_id, password)
+        for game in games:
+            print(game)
+            try:
+                connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
+                                                                               5672,
+                                                                               str(game),
+                                                                               credentials=auth))
+            except Exception as e:
+                print(e)
+                continue
+            try:
+                channel = connection.channel()
+
+                channel.queue_declare(f'public.{user_id}')
+                channel.queue_bind(exchange='poker_exchange',
+                                   queue=f'public.{user_id}',
+                                   routing_key='public')
+            except Exception as e:
+                print(e)
+                continue
+            self.games[game] = Game(nickname, channel, False, user_id, key)
 
     def guest_connect(self):
-        key = 1 if not self.games else max(self.games.keys()) + 1
-        self.games[key] = Game(self.connect_window.top_window.nickname.text(),
-                               self.connect_window.top_window.ip_text.text(),
-                               self.config["server_port"],
-                               self.config["use_ssl"],
-                               self.connect_window.top_window.spectate.checkState(),
-                               self.connect_window.connect_room_tab,
-                               )
-        self.games[key].guest_connect()
+        pass  # TODO
 
     def host_connect(self):
-        key = 1 if not self.games else max(self.games.keys()) + 1
-        self.games[key] = Game(self.connect_window.top_window.nickname.text(),
-                               self.connect_window.top_window.ip_text.text(),
-                               self.config["server_port"],
-                               self.config["use_ssl"],
-                               self.connect_window.top_window.spectate.checkState(),
-                               self.connect_window.host_room_tab,
-                               )
-        self.games[key].host_connect()
+        pass  # TODO
 
 
 def main():
