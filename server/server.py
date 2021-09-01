@@ -552,7 +552,5 @@ class SeatingListener:
         try:
             g = Game(self.players, self.code, credentials, self.game_config)
             g.run()
-        except Exception:
-
         finally:
             requests.delete(f'http://localhost:15672/api/vhosts/{self.code}', auth=('admin', rabbitmq_admin_password))
