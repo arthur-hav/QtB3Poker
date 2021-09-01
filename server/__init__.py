@@ -8,10 +8,10 @@ import os
 from pymongo import MongoClient
 import multiprocessing as mp
 from .server import SeatingListener
-from base64 import b64encode
 import pika
 from collections import defaultdict
 from cryptography.fernet import Fernet
+import psutil
 
 
 def token_required(f):
@@ -83,11 +83,12 @@ def login():
                               # TODO: Cypher api/server
                               body=json.dumps({'id': str(user['_id']), 'key': key.decode('utf-8')}).encode('utf-8'))
         games = list(db.tourneys.find({'players': {'$in': [str(user['_id'])]}, 'game': {'$exists': True}}))
+
         return {'status': 'success',
                 'token': get_token(user['_id']).decode('utf-8'),
                 'key': key.decode('utf-8'),
                 'id': str(user['_id']),
-                'games': [g['game'] for g in games if request.form['user'] not in g['placements']]}
+                'games': [g['game'] for g in games if psutil.pid_exists(g)}
     return {'status': 'fail', 'reason': 'Bad username or password'}
 
 

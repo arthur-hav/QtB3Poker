@@ -375,6 +375,8 @@ class Game:
                                                              'players': [p.queue_id for p in players],
                                                              'game': os.getpid(),
                                                              'date': self.start_time}).inserted_id
+        self.last_msg_private = {}
+        self.last_msg_public = None
         self.blind_augment = self.start_time
         self.channel = self.connection.channel()
         self.channel.exchange_declare(exchange='poker_exchange', exchange_type='topic')
@@ -391,6 +393,7 @@ class Game:
             rabbit_consumer.start()
 
     def broadcast(self, msg):
+        self.last_msg_public = msg
         self.channel.basic_publish(exchange='poker_exchange',
                                    routing_key='public',
                                    body=json.dumps(msg).encode('utf-8'))
@@ -400,6 +403,7 @@ class Game:
             if p.queue_id == p_id:
                 if not p.key:
                     return
+                self.last_msg_private[p.queue_id] = msg
                 self.channel.basic_publish(exchange='poker_exchange',
                                            routing_key='public',
                                            body=json.dumps({'private_to': p_id,
@@ -420,12 +424,19 @@ class Game:
                               auto_ack=True)
         channel.start_consuming()
 
+    def repeat(self, p_id):
+        self.broadcast(self.last_msg_public)
+        self.send_player(p_id, self.last_msg_private[p_id])
+
     def connect_player(self, ch, method, properties, body):
         key_dict = json.loads(body.decode('utf-8'))
         for player in self.players:
             if player.queue_id == key_dict['id']:
                 player.disconnected = False
                 player.key = Fernet(key_dict['key'])
+                for i in range(3):
+                    time.sleep(1)
+                    self.repeat(player)
 
     def check_eliminated(self):
         eliminated_players = [p for p in self.players if p.chips <= 0]
@@ -538,6 +549,10 @@ class SeatingListener:
         credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
 
         self.players = [Human(p['login'], str(p['_id'])) for p in players]
-        g = Game(self.players, self.code, credentials, self.game_config)
-        g.run()
-        requests.delete(f'http://localhost:15672/api/vhosts/{self.code}', auth=('admin', rabbitmq_admin_password))
+        try:
+            g = Game(self.players, self.code, credentials, self.game_config)
+            g.run()
+        except Exception:
+
+        finally:
+            requests.delete(f'http://localhost:15672/api/vhosts/{self.code}', auth=('admin', rabbitmq_admin_password))
