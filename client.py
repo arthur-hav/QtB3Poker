@@ -9,7 +9,7 @@ import random
 import yaml
 import pika
 import requests
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 import json
 import base64
 
@@ -76,7 +76,10 @@ class Listener(QObject):
         body = json.loads(body.decode('utf-8'))
         if 'private_to' in body:
             if body['private_to'] == self.player_id:
-                self.private.emit(json.loads(Fernet(self.key.encode('utf-8')).decrypt(base64.b64decode(body['data'].encode('utf-8'))).decode('utf-8')))
+                try:
+                    self.private.emit(json.loads(Fernet(self.key.encode('utf-8')).decrypt(base64.b64decode(body['data'].encode('utf-8'))).decode('utf-8')))
+                except InvalidToken:
+                    pass
         else:
             self.gamestate.emit(body)
 
@@ -547,7 +550,7 @@ class PokerTableWidget(QWidget):
 
     def setActive(self, nickname):
         if nickname == self.nickname:
-            self.show_actions()
+            self.bet_actions.show()
         else:
             self.bet_actions.hide()
         for p in self.players:
@@ -624,27 +627,18 @@ class PokerTableWidget(QWidget):
         else:
             self.bet_actions.raise_group.hide()
 
-    def show_actions(self):
-        self.bet_actions.bet.setText(f'Raise {self.bet_actions.raise_group.raise_size}')
-        self.bet_actions.call.setText(f'Call {self.to_call}' if self.to_call else 'Check')
-        if not self.to_call:
-            self.bet_actions.fold.hide()
-        else:
-            self.bet_actions.fold.show()
-        self.bet_actions.show()
-
 
 class Game(QObject):
-    def __init__(self, nickname, channel, spectate_only, user_id, key):
+    def __init__(self, nickname, l_channel, w_channel, spectate_only, user_id, key):
         super().__init__()
         self.nickname = nickname
         self.user_id = user_id
         self.started = False
         self.spectate_only = spectate_only
         self.poker_table = PokerTableWidget(nickname, spectate_only)
-        self.channel = channel
+        self.channel = w_channel
         self.listener_thread = QThread()
-        self.listener = Listener(channel, user_id, key)
+        self.listener = Listener(l_channel, user_id, key)
         self.listener.moveToThread(self.listener_thread)
         self.listener.gamestate.connect(self.on_recv)
         self.listener.private.connect(self.on_recv_private)
@@ -656,6 +650,9 @@ class Game(QObject):
         self.poker_timer_thread.started.connect(self.poker_timer.run)
         self.poker_timer.timer_sig.connect(self.decrease_timer)
         self.listener_thread.start()
+        self.poker_table.bet_actions.call.pressed.connect(self.call_btn)
+        self.poker_table.bet_actions.fold.pressed.connect(self.fold_btn)
+        self.poker_table.bet_actions.bet.pressed.connect(self.bet_btn)
 
     def create_game(self):
         # TODO
@@ -692,6 +689,7 @@ class Game(QObject):
         if not self.started:
             self.poker_table.show()
             self.poker_table.startup_table([p['name'] for p in gamestate.get('players')])
+            self.poker_timer_thread.start()
             self.started = True
         if 'finished' in gamestate:
             self.poker_table.event_log.push_message(f"You finished place {gamestate['finished']}")
@@ -703,17 +701,25 @@ class Game(QObject):
         self.poker_table.setBoard(gamestate.get('board'))
         self.poker_table.setPlayers(gamestate.get('players'))
         self.poker_table.setPotSize(gamestate.get('pot'), gamestate.get('prev_pot'))
+        print('setActive', gamestate.get('active'))
         self.poker_table.setActive(gamestate.get('active'))
         self.poker_table.setWinningHand(gamestate.get('winning_hand', ''))
         self.poker_table.playSounds(gamestate.get('last_action'))
         self.timer_mutex.unlock()
 
     def on_recv_private(self, gamestate):
-        print(gamestate)
         self.poker_table.setToCall(gamestate.get('to_call'))
         self.poker_table.setRaiseSize(gamestate.get('min_raise'), gamestate.get('nl_raise'))
+        self.poker_table.bet_actions.bet.setText(f'Raise {self.poker_table.bet_actions.raise_group.raise_size}')
+        self.poker_table.bet_actions.call.setText(f'Call {self.poker_table.to_call}' if self.poker_table.to_call else 'Check')
+        if not self.poker_table.to_call:
+            self.poker_table.bet_actions.fold.hide()
+        else:
+            self.poker_table.bet_actions.fold.show()
         if 'holes' in gamestate:
             self.poker_table.players[0].setHoles([gamestate['holes'][0:2], gamestate['holes'][2:4], gamestate['holes'][4:]])
+        if 'log' in gamestate:
+            self.poker_table.event_log.push_message(gamestate.get('log'))
 
     def done(self):
         self.listener.stop()
@@ -756,7 +762,11 @@ class MainWindow(QMainWindow):
         for game in games:
             print(game)
             try:
-                connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
+                l_connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
+                                                                               5672,
+                                                                               str(game),
+                                                                               credentials=auth))
+                w_connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
                                                                                5672,
                                                                                str(game),
                                                                                credentials=auth))
@@ -764,16 +774,16 @@ class MainWindow(QMainWindow):
                 print(e)
                 continue
             try:
-                channel = connection.channel()
-
-                channel.queue_declare(f'public.{user_id}')
-                channel.queue_bind(exchange='poker_exchange',
+                l_channel = l_connection.channel()
+                w_channel = w_connection.channel()
+                l_channel.queue_declare(f'public.{user_id}')
+                l_channel.queue_bind(exchange='poker_exchange',
                                    queue=f'public.{user_id}',
                                    routing_key='public')
             except Exception as e:
                 print(e)
                 continue
-            self.games[game] = Game(nickname, channel, False, user_id, key)
+            self.games[game] = Game(nickname, l_channel, w_channel, False, user_id, key)
 
     def guest_connect(self):
         pass  # TODO
