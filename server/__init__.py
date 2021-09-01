@@ -1,4 +1,4 @@
-from flask import Flask, request, g
+from flask import Flask, request
 import requests
 import jwt
 import json
@@ -8,10 +8,10 @@ import os
 from pymongo import MongoClient
 import multiprocessing as mp
 from .server import SeatingListener
-import pika
-from collections import defaultdict
 from cryptography.fernet import Fernet
 import psutil
+import pika
+import redis
 
 
 def token_required(f):
@@ -62,6 +62,10 @@ def register():
     requests.put(f'http://localhost:15672/api/users/{user_id}',
                  auth=('admin', rabbitmq_admin_password),
                  data=json.dumps({"password": request.form['password'], "tags": ""}))
+    requests.put(f'http://localhost:15672/api/permissions/game_start/{user_id}',
+                 auth=('admin', rabbitmq_admin_password),
+                 data=json.dumps({"configure": f"$^", "write": "$^",
+                                  "read": f"public.{user_id}"}))
     return {'status': 'success', 'user_id': user_id}
 
 
@@ -82,8 +86,17 @@ def login():
                               routing_key='keys',
                               # TODO: Cypher api/server
                               body=json.dumps({'id': str(user['_id']), 'key': key.decode('utf-8')}).encode('utf-8'))
-        games = list(db.tourneys.find({'players': {'$in': [str(user['_id'])]}, 'game': {'$exists': True}}))
+        conn = pika.BlockingConnection(pika.ConnectionParameters('localhost',
+                                                                 5672,
+                                                                 'game_start',
+                                                                 credentials=credentials))
+        channel = conn.channel()
+        channel.queue_declare(queue=f'public.{str(user["_id"])}')
+        channel.queue_bind(queue=f'public.{str(user["_id"])}', exchange='public')
 
+        games = list(db.tourneys.find({'players': {'$in': [str(user['_id'])]}, 'game': {'$exists': True}}))
+        r = redis.Redis()
+        r.set(f'session.{user["_id"]}.key', key)
         return {'status': 'success',
                 'token': get_token(user['_id']).decode('utf-8'),
                 'key': key.decode('utf-8'),
@@ -102,14 +115,19 @@ def create_game(user_id):
     users = list(db.users.find({'login': {'$in': players_login}}))
     p = mp.Process(target=server.SeatingListener, args=(game_config, users))
     p.start()
-    for u in users:
-        u_id = str(u['_id'])
-        lst_dict = getattr(g, 'game_users', defaultdict(list))
-        lst_dict[u_id].append(p.pid)
-        g.game_users = lst_dict
+    for user in users:
+        r = redis.Redis()
+        key = r.get(f'session.{user["_id"]}.key')
+        if key:
+            rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
+            credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
+            connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', credentials=credentials))
+            channel = connection.channel()
+            channel.queue_declare('keys.' + str(p.pid))
+            channel.exchange_declare(exchange='poker_exchange', exchange_type='topic')
+            channel.queue_bind(exchange='poker_exchange',
+                               queue='keys.' + str(p.pid),
+                               routing_key='keys')
+            channel.basic_publish(exchange='poker_exchange', routing_key='keys',
+                                  body=json.dumps({'id': str(user['_id']), 'key': key.decode('utf-8')}).encode('utf-8'))
     return {'status': 'success', 'server_id': p.pid}
-
-
-@app.route("/end_game", methods=['POST'])
-def end_game():
-    pass

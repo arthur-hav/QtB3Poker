@@ -58,6 +58,24 @@ class PokerTimer(QObject):
             time.sleep(0.5)
 
 
+class GameStartListener(QObject):
+    game_start = pyqtSignal(str)
+
+    def __init__(self, channel, player_id):
+        super().__init__()
+        self.channel = channel
+        self.player_id = player_id
+
+    def run(self):
+        self.channel.basic_consume(f'public.{self.player_id}', on_message_callback=self.callback, auto_ack=True)
+        self.channel.start_consuming()
+
+    def callback(self, ch, method, properties, body):
+        body = json.loads(body.decode('utf-8'))
+        if self.player_id in body['players']:
+            self.game_start.emit(body['game'])
+
+
 class Listener(QObject):
     gamestate = pyqtSignal(dict)
     private = pyqtSignal(dict)
@@ -74,6 +92,8 @@ class Listener(QObject):
 
     def callback(self, ch, method, properties, body):
         body = json.loads(body.decode('utf-8'))
+        if not body:
+            return
         if 'private_to' in body:
             if body['private_to'] == self.player_id:
                 try:
@@ -513,6 +533,10 @@ class PokerTableWidget(QWidget):
         self.bet_actions = BetActions()
         self.bet_actions.setParent(self)
         self.bet_actions.move(560, 320)
+        self.reconnect = QPushButton()
+        self.reconnect.move(560, 540)
+        self.reconnect.setText('Reconnect')
+        self.reconnect.setParent(self)
         self.event_log = EventLog()
         self.event_log.setParent(self)
         self.event_log.move(20, 500)
@@ -548,11 +572,15 @@ class PokerTableWidget(QWidget):
     def setBoard(self, board):
         self.board.setBoard(board)
 
-    def setActive(self, nickname):
+    def setActive(self, nickname, players):
+        self.reconnect.hide()
         if nickname == self.nickname:
             self.bet_actions.show()
         else:
             self.bet_actions.hide()
+            for p in players:
+                if p['name'] == self.nickname and p['disconnected']:
+                    self.reconnect.show()
         for p in self.players:
             if p.nickname == nickname:
                 p.timer.setValue(1000)
@@ -649,10 +677,10 @@ class Game(QObject):
         self.poker_timer.moveToThread(self.poker_timer_thread)
         self.poker_timer_thread.started.connect(self.poker_timer.run)
         self.poker_timer.timer_sig.connect(self.decrease_timer)
-        self.listener_thread.start()
         self.poker_table.bet_actions.call.pressed.connect(self.call_btn)
         self.poker_table.bet_actions.fold.pressed.connect(self.fold_btn)
         self.poker_table.bet_actions.bet.pressed.connect(self.bet_btn)
+        self.poker_table.reconnect.pressed.connect(self.reconnect)
 
     def create_game(self):
         # TODO
@@ -661,6 +689,11 @@ class Game(QObject):
                          'blind_percent': float(self.room_tab.blind_percent.text()),
                          'skim_percent': float(self.room_tab.skim_percent.text()),
                          'number_seats': int(self.room_tab.number_seats.text())}
+
+    def start(self):
+        self.channel.queue_purge(f'public.{self.user_id}')
+        self.reconnect()
+        self.listener_thread.start()
 
     def call_btn(self):
         self.channel.basic_publish(exchange='poker_exchange',
@@ -676,6 +709,11 @@ class Game(QObject):
         self.channel.basic_publish(exchange='poker_exchange',
                                    routing_key=f'game.{self.user_id}',
                                    body=f'r {self.poker_table.bet_actions.raise_group.raise_size}'.encode('utf-8'))
+
+    def reconnect(self):
+        self.channel.basic_publish(exchange='poker_exchange',
+                                   routing_key=f'game.{self.user_id}',
+                                   body=b'reconnect')
 
     def decrease_timer(self):
         for player in self.poker_table.players:
@@ -701,8 +739,7 @@ class Game(QObject):
         self.poker_table.setBoard(gamestate.get('board'))
         self.poker_table.setPlayers(gamestate.get('players'))
         self.poker_table.setPotSize(gamestate.get('pot'), gamestate.get('prev_pot'))
-        print('setActive', gamestate.get('active'))
-        self.poker_table.setActive(gamestate.get('active'))
+        self.poker_table.setActive(gamestate.get('active'), gamestate.get('players'))
         self.poker_table.setWinningHand(gamestate.get('winning_hand', ''))
         self.poker_table.playSounds(gamestate.get('last_action'))
         self.timer_mutex.unlock()
@@ -740,8 +777,10 @@ class MainWindow(QMainWindow):
         self.connect_window.setFixedSize(600, 400)
         self.setCentralWidget(self.connect_window)
         self.adjustSize()
-        self.net_listener = None
         self.poker_timer = None
+        self.user_id = None
+        self.password = None
+        self.game_listener_thread = QThread()
         self.games = {}
 
     def set_tutorial(self):
@@ -754,36 +793,42 @@ class MainWindow(QMainWindow):
 
     def show_options(self, token, key, games, user_id, password):
         self.token = token
-        print(token)
-        nickname = self.connect_window.top_window.nickname.text()
-        self.connect_window.top_window.hide()
-        self.connect_window.connect_option_tabs.show()
+        self.user_id = user_id
+        self.password = password
+        self.key = key
         auth = pika.PlainCredentials(user_id, password)
+        conn = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
+                                                                                5672,
+                                                                                'game_start',
+                                                                                credentials=auth))
+        channel = conn.channel()
+
+        self.game_listener = GameStartListener(channel, user_id)
+        self.game_listener.moveToThread(self.game_listener_thread)
+        self.game_listener.game_start.connect(self.on_recv)
+        self.game_listener_thread.started.connect(self.game_listener.run)
+        self.game_listener_thread.start()
         for game in games:
-            print(game)
-            try:
-                l_connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
-                                                                               5672,
-                                                                               str(game),
-                                                                               credentials=auth))
-                w_connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
-                                                                               5672,
-                                                                               str(game),
-                                                                               credentials=auth))
-            except Exception as e:
-                print(e)
-                continue
-            try:
-                l_channel = l_connection.channel()
-                w_channel = w_connection.channel()
-                l_channel.queue_declare(f'public.{user_id}')
-                l_channel.queue_bind(exchange='poker_exchange',
-                                   queue=f'public.{user_id}',
-                                   routing_key='public')
-            except Exception as e:
-                print(e)
-                continue
-            self.games[game] = Game(nickname, l_channel, w_channel, False, user_id, key)
+            self.on_recv(game)
+
+    def on_recv(self, game_id):
+        auth = pika.PlainCredentials(self.user_id, self.password)
+        nickname = self.connect_window.top_window.nickname.text()
+        try:
+            l_connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
+                                                                             5672,
+                                                                             str(game_id),
+                                                                             credentials=auth))
+            w_connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
+                                                                             5672,
+                                                                             str(game_id),
+                                                                             credentials=auth))
+            l_channel = l_connection.channel()
+            w_channel = w_connection.channel()
+            self.games[game_id] = Game(nickname, l_channel, w_channel, False, self.user_id, self.key)
+            self.games[game_id].start()
+        except Exception as e:
+            print(e)
 
     def guest_connect(self):
         pass  # TODO

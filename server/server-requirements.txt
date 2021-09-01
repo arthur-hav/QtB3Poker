@@ -6,3 +6,4 @@ pyjwt
 passlib
 requests
 psutil
+redis
