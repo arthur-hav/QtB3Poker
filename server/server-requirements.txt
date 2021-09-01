@@ -5,3 +5,4 @@ flask
 pyjwt
 passlib
 requests
+psutil

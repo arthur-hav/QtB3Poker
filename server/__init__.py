@@ -88,7 +88,7 @@ def login():
                 'token': get_token(user['_id']).decode('utf-8'),
                 'key': key.decode('utf-8'),
                 'id': str(user['_id']),
-                'games': [g['game'] for g in games if psutil.pid_exists(g)]}
+                'games': [g['game'] for g in games if psutil.pid_exists(g['game'])]}
     return {'status': 'fail', 'reason': 'Bad username or password'}
 
 
