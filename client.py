@@ -643,8 +643,7 @@ class PokerTableWidget(QWidget):
 
     def setPotSize(self, pot_size, prev_pot):
         self.pot_size.set_amount(prev_pot)
-        if len(pot_size) != 1:
-            self.pot_size.text_widget.setText(f'{pot_size[0]} / {pot_size[1]}')
+        self.pot_size.text_widget.setText(f'{" / ".join(str(p) for p in pot_size)}')
         self.pot_size.text_widget.adjustSize()
 
     def setRaiseSize(self, min_raise, nl_raise):
@@ -730,7 +729,7 @@ class Game(QObject):
             self.poker_timer_thread.start()
             self.started = True
         if 'finished' in gamestate:
-            self.poker_table.event_log.push_message(f"You finished place {gamestate['finished']}")
+            self.poker_table.event_log.push_message(f"{gamestate['finished']} finished place {gamestate['place']}")
             return
         if 'log' in gamestate:
             self.poker_table.event_log.push_message(gamestate.get('log'))

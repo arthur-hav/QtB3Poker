@@ -15,6 +15,11 @@ import threading
 from cryptography.fernet import Fernet
 import pika
 from base64 import b64encode
+import redis
+import logging
+
+logger = logging.getLogger()
+
 
 
 def urand():
@@ -133,6 +138,9 @@ class Human(Player):
     def put_action(self, ch, method, properties, body):
         if body == b'reconnect':
             self.disconnected = False
+            r = redis.Redis()
+            key = r.get(f'session.{self.queue_id}.key')
+            self.key = Fernet(key) if key else self.key
             self.game.repeat(self.queue_id)
             return
         self.action_queue.put(body)
@@ -225,21 +233,22 @@ class GameHand:
             return p
         return None
 
-    def calc_pot(self):
-        min_amount_bet_allin = 0
+    def calc_bet_pot(self):
+        bet_amounts = []
         for p in self.players:
             if not p.chips and p.amount_bet < self.max_amount_bet:
-                min_amount_bet_allin = p.amount_bet
-        if min_amount_bet_allin:
-            pot = [0, 0]
-            for p in self.players:
-                pot[0] += min(p.amount_bet, min_amount_bet_allin)
-                pot[1] += max(0, p.amount_bet - min_amount_bet_allin)
-        else:
-            pot = [0]
-            for p in self.players:
-                pot[0] += p.amount_bet
-        return pot
+                bet_amounts.append(p.amount_bet)
+        bet_amounts.append(self.max_amount_bet)
+        pot_amounts = [0] * len(bet_amounts)
+        for player in self.players:
+            for i, amount in enumerate(bet_amounts):
+                amount = min(player.amount_bet, amount)
+                pot_amounts[i] += amount
+        prev_amount = 0
+        for i, amount in enumerate(pot_amounts):
+            pot_amounts[i] -= prev_amount
+            prev_amount = amount
+        return list(zip(bet_amounts, pot_amounts))
 
     def calc_prev_street_pot(self):
         return sum(p.amount_bet - p.street_amount_bet for p in self.players)
@@ -255,7 +264,7 @@ class GameHand:
             'board': ''.join(Card.int_to_str(c) for c in self.flop1+self.flop2+self.turn1+self.turn2+self.river),
             'active': to_act.nick if to_act else None,
             'prev_pot': self.calc_prev_street_pot(),
-            'pot': self.calc_pot(),
+            'pot': [bp[1] for bp in self.calc_bet_pot()],
             'players': [
                 {'chips': p.chips,
                  'bet': p.street_amount_bet,
@@ -322,15 +331,14 @@ class GameHand:
         return players_actable[0] if len(players_actable) > 1 else None
 
     def check_all_folded(self):
-
         if len([p for p in self.players if not p.is_folded]) == 1:
             winner = [p for p in self.players if not p.is_folded][0]
             for p in self.players:
                 self.hand_document['winnings'][p.nick] -= p.amount_bet
-            winner.chips += self.calc_pot()[0]
+            winner.chips += self.calc_bet_pot()[0][1]
             if len(self.players) == 2 and not self.flop1:
                 self.players.reverse()
-            self.hand_document['winnings'][winner.nick] += self.calc_pot()[0]
+            self.hand_document['winnings'][winner.nick] += self.calc_bet_pot()[0][1]
             self.mongo_db.insert_one(self.hand_document)
             self.send_state(None)
             time.sleep(1)
@@ -339,34 +347,44 @@ class GameHand:
 
     def showdown(self):
         ev = evaluator.Evaluator()
-        min_comb = None
-        min_player = None
-        min_rank = None
 
         for p in self.players:
             self.hand_document['winnings'][p.nick] -= p.amount_bet
 
-        for i, pot in enumerate(self.calc_pot()):
+        player_ranks = {}
+        players_comb = {}
+        for player in self.players:
+            if player.is_folded:
+                continue
+            for comb in itertools.combinations(player.hand, 2):
+                for flop in self.flop1, self.flop2:
+                    for turn in self.turn1, self.turn2:
+                        for bcomb in itertools.combinations(flop + turn + self.river, 3):
+                            rank = ev.evaluate(cards=list(comb), board=list(bcomb))
+                            if not player_ranks.get(player.queue_id) or rank < player_ranks[player.queue_id]:
+                                player_ranks[player.queue_id] = rank
+                                players_comb[player.queue_id] = list(comb) + list(bcomb)
+
+        last_amount_bet = 0
+        for i, (bet, pot) in enumerate(self.calc_bet_pot()):
+            min_rank = None
+            min_player = None
             for player in self.players:
-                if player.is_folded:
+                if player.is_folded or player.amount_bet < bet - last_amount_bet:
+                    player.amount_bet = 0
                     continue
-                if i > 0 and player.amount_bet < self.max_amount_bet:
-                    continue
-                for comb in itertools.combinations(player.hand, 2):
-                    for flop in self.flop1, self.flop2:
-                        for turn in self.turn1, self.turn2:
-                            for bcomb in itertools.combinations(flop + turn + self.river, 3):
-                                rank = ev.evaluate(cards=list(comb), board=list(bcomb))
-                                if min_rank is None or min_rank > rank:
-                                    min_comb = list(comb) + list(bcomb)
-                                    min_rank = rank
-                                    min_player = player
+                if min_rank is None or player_ranks[player.queue_id] < min_rank:
+                    min_rank = player_ranks[player.queue_id]
+                    min_player = player
+                player.amount_bet -= bet
+            last_amount_bet = bet
             self.hand_document['winnings'][min_player.nick] += pot
             min_player.chips += pot
+            self.send_state(None, showdown=players_comb[min_player.queue_id])
+            logger.info("%s %s %s", bet, pot, min_player.nick)
+            time.sleep(3)
 
-        self.send_state(None, showdown=min_comb)
         self.mongo_db.insert_one(self.hand_document)
-        return min_player, min_comb
 
 
 class Game:
@@ -392,9 +410,12 @@ class Game:
         self.channel.queue_bind(exchange='poker_exchange',
                                 queue='public',
                                 routing_key='public')
-        rabbit_consumer = threading.Thread(target=self.read_keys)
-        rabbit_consumer.start()
+        r = redis.Redis()
         for p in self.players:
+            p.key = r.get(f'session.{p.queue_id}.key')
+            if p.key:
+                p.key = Fernet(p.key)
+                p.disconnected = False
             p.chips = game_config['start_chips']
             self.channel.queue_declare(f'public.{p.queue_id}')
             self.channel.queue_bind(exchange='poker_exchange',
@@ -424,28 +445,13 @@ class Game:
 
     def game_start_send(self, credentials):
         connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, 'game_start',
-                                                                            credentials=credentials))
+                                                                       credentials=credentials))
         channel = connection.channel()
         channel.exchange_declare(exchange='public', exchange_type='fanout')
         channel.basic_publish(exchange='public',
                               routing_key='public',
                               body=json.dumps({'game': self.code,
                                                'players': [p.queue_id for p in self.players]}).encode('utf-8'))
-
-    def read_keys(self):
-        rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
-        credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', credentials=credentials))
-        channel = connection.channel()
-        channel.queue_declare('keys.' + self.code)
-        channel.exchange_declare(exchange='poker_exchange', exchange_type='topic')
-        channel.queue_bind(exchange='poker_exchange',
-                           queue='keys.' + self.code,
-                           routing_key='keys')
-        channel.basic_consume(queue='keys.' + self.code,
-                              on_message_callback=self.connect_player,
-                              auto_ack=True)
-        channel.start_consuming()
 
     def repeat(self, p_id):
         if self.last_msg_public:
@@ -543,14 +549,23 @@ class Game:
             if next_hand:
                 continue
             hand.showdown()
-            time.sleep(5)
+            time.sleep(2)
             self.check_eliminated()
+        if self.players:
+            self.send_player(self.players[0].queue_id, {'log': 'You won the tournament!'})
 
 
 class SeatingListener:
     def __init__(self, game_config, players):
         self.game_config = game_config
         self.code = str(os.getpid())
+
+        handler = logging.FileHandler('/var/log/poker/game.log')
+        formatter = logging.Formatter('[pid %(process)d] - %(message)s')
+        handler.setFormatter(formatter)
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+
         rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
         requests.put(f'http://localhost:15672/api/vhosts/{self.code}',
                      auth=('admin', rabbitmq_admin_password))

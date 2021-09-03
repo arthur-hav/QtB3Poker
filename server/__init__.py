@@ -79,13 +79,6 @@ def login():
     if sha256_crypt.verify(request.form['password'], user['pass_hash']):
         rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
         credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', credentials=credentials))
-        channel = connection.channel()
-        channel.exchange_declare('poker_exchange', 'topic')
-        channel.basic_publish(exchange='poker_exchange',
-                              routing_key='keys',
-                              # TODO: Cypher api/server
-                              body=json.dumps({'id': str(user['_id']), 'key': key.decode('utf-8')}).encode('utf-8'))
         conn = pika.BlockingConnection(pika.ConnectionParameters('localhost',
                                                                  5672,
                                                                  'game_start',
@@ -97,6 +90,7 @@ def login():
         games = list(db.tourneys.find({'players': {'$in': [str(user['_id'])]}, 'game': {'$exists': True}}))
         r = redis.Redis()
         r.set(f'session.{user["_id"]}.key', key)
+        r.expire(f'session.{user["_id"]}.key', 60*60*24)  # One day key storing
         return {'status': 'success',
                 'token': get_token(user['_id']).decode('utf-8'),
                 'key': key.decode('utf-8'),
@@ -115,19 +109,4 @@ def create_game(user_id):
     users = list(db.users.find({'login': {'$in': players_login}}))
     p = mp.Process(target=server.SeatingListener, args=(game_config, users))
     p.start()
-    for user in users:
-        r = redis.Redis()
-        key = r.get(f'session.{user["_id"]}.key')
-        if key:
-            rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
-            credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
-            connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', credentials=credentials))
-            channel = connection.channel()
-            channel.queue_declare('keys.' + str(p.pid))
-            channel.exchange_declare(exchange='poker_exchange', exchange_type='topic')
-            channel.queue_bind(exchange='poker_exchange',
-                               queue='keys.' + str(p.pid),
-                               routing_key='keys')
-            channel.basic_publish(exchange='poker_exchange', routing_key='keys',
-                                  body=json.dumps({'id': str(user['_id']), 'key': key.decode('utf-8')}).encode('utf-8'))
     return {'status': 'success', 'server_id': p.pid}
