@@ -1,0 +1,6 @@
+mongodb:
+  user: 'user'
+  password: 'password'
+rabbitmq:
+  user: 'user'
+  password: 'password'

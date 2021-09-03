@@ -212,6 +212,7 @@ class MainConnectWindow(QWidget):
         self.tutorial_btn.pressed.connect(self.press_tutorial.emit)
 
         self.top_window = TopConnectWindow(default_nickname, default_server)
+        self.top_window.login_failure.connect(self.push_auth_fail)
         layout.addWidget(self.top_window)
 
         self.connect_option_tabs = QTabWidget()
@@ -222,10 +223,19 @@ class MainConnectWindow(QWidget):
         layout.addWidget(self.connect_option_tabs)
         self.connect_option_tabs.hide()
         self.setLayout(layout)
+        self.games_listing = GamesWindow()
+        layout.addWidget(self.games_listing)
+        self.query_logs = EventLog()
+        self.query_logs.setFixedHeight(60)
+        layout.addWidget(self.query_logs)
 
+    def push_auth_fail(self, msg):
+        self.query_logs.push_message(msg)
 
 class TopConnectWindow(QWidget):
     login_success = pyqtSignal(str, str, list, str, str)
+    login_failure = pyqtSignal(str)
+    register_success = pyqtSignal()
 
     def __init__(self, default_nickname, default_server):
         super().__init__()
@@ -241,6 +251,10 @@ class TopConnectWindow(QWidget):
         self.fqdn.setText(default_server)
         layout.addRow(QLabel("Server name"), self.fqdn)
         self.login = QPushButton()
+        self.login.setText('Register')
+        self.login.pressed.connect(self.register_request)
+        layout.addRow(self.login)
+        self.login = QPushButton()
         self.login.setText('Login')
         self.login.pressed.connect(self.login_request)
         layout.addRow(self.login)
@@ -253,7 +267,16 @@ class TopConnectWindow(QWidget):
         if 'status' in resp_data and resp_data['status'] == 'success':
             self.login_success.emit(resp_data['token'], resp_data['key'],
                                     resp_data['games'], resp_data['id'], password)
+        else:
+            self.login_failure.emit(resp_data['reason'])
 
+    def register_request(self):
+        user = self.nickname.text()
+        password = self.password.text()
+        response = requests.post(f'https://{self.fqdn.text()}/register', data={'user': user, 'password': password})
+        resp_data = response.json()
+        if 'status' in resp_data and resp_data['status'] == 'success':
+            self.register_success.emit()
 
 class BetAmountWidget(QWidget):
     def __init__(self, nb_cols=2):
@@ -352,7 +375,6 @@ class EventLog(QLabel):
         super().__init__()
         self.messages = []
         self.setStyleSheet('background-color: black; color: white')
-        self.setFixedSize(200, 78)
         text_font = QFont("Sans", 9)
         self.setFont(text_font)
         self.setAlignment(Qt.AlignBottom)
@@ -538,6 +560,7 @@ class PokerTableWidget(QWidget):
         self.reconnect.setText('Reconnect')
         self.reconnect.setParent(self)
         self.event_log = EventLog()
+        self.event_log.setFixedSize(200, 78)
         self.event_log.setParent(self)
         self.event_log.move(20, 500)
 
@@ -762,6 +785,25 @@ class Game(QObject):
         self.poker_timer.done = True
 
 
+class GamesWindow(QScrollArea):
+    def __init__(self):
+        super().__init__()
+        self.games = []
+        self.layout = QHBoxLayout()
+        self.setLayout(self.layout)
+
+    def query_games(self, server, token):
+        resp = requests.get(f'https://{server}/list_games', headers={'Authorization': token})
+
+        if not resp.json() or not resp.json()['status'] == 'success':
+            return
+        for game in self.games:
+            label = QLabel(game)
+            self.layout.addWidget(label)
+            self.games.append(game)
+
+
+
 class MainWindow(QMainWindow):
 
     def __init__(self, config):
@@ -771,7 +813,8 @@ class MainWindow(QMainWindow):
         self.connect_window = MainConnectWindow(self.config["nickname"],
                                                 self.config["server"],
                                                 self.config['room_host_defaults'])
-        self.connect_window.top_window.login_success.connect(self.show_options)
+        self.connect_window.top_window.login_success.connect(self.show_games)
+        self.connect_window.top_window.register_success.connect(self.log_success_register)
         self.connect_window.press_tutorial.connect(self.set_tutorial)
         self.connect_window.setFixedSize(600, 400)
         self.setCentralWidget(self.connect_window)
@@ -782,6 +825,9 @@ class MainWindow(QMainWindow):
         self.game_listener_thread = QThread()
         self.games = {}
 
+    def log_success_register(self):
+        self.connect_window.query_logs.push_message("Successfully registered")
+
     def set_tutorial(self):
         self.t = Tutorial()
         self.t.show()
@@ -790,11 +836,14 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.connect_window)
         self.adjustSize()
 
-    def show_options(self, token, key, games, user_id, password):
+    def show_games(self, token, key, games, user_id, password):
         self.token = token
         self.user_id = user_id
         self.password = password
         self.key = key
+        self.connect_window.top_window.hide()
+        self.connect_window.games_listing.query_games(self.connect_window.top_window.fqdn.text(), token)
+        self.connect_window.games_listing.show()
         auth = pika.PlainCredentials(user_id, password)
         conn = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
                                                                                 5672,

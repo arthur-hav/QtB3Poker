@@ -17,13 +17,21 @@ import pika
 from base64 import b64encode
 import redis
 import logging
+import yaml
+
 
 logger = logging.getLogger()
 
 
-
 def urand():
     return struct.unpack('I', os.urandom(4))[0] * 2 ** -32
+
+
+def get_db():
+    read_yaml = yaml.safe_load(open('server/conf.yml'))
+    mongodb_user, mongodb_password = read_yaml['mongodb']['user'], read_yaml['mongodb']['password']
+    pmc = MongoClient('mongodb://%s:%s@127.0.0.1' % (mongodb_user, mongodb_password))
+    return pmc.bordeaux_poker_db
 
 
 class Deck:
@@ -102,7 +110,7 @@ class Human(Player):
 
         if action.lower() == 'c':
             amount_called = min(gamehand.max_amount_bet - self.amount_bet, self.chips)
-            self.amount_bet = gamehand.max_amount_bet
+            self.amount_bet += amount_called
             self.street_amount_bet += amount_called
             self.chips -= amount_called
             gamehand.hand_document['actions'][gamehand.street_act].append({'code': 'C',
@@ -173,8 +181,8 @@ class GameHand:
         self.street_act = 'blinds'
         for player in self.players:
             player.to_act = False
-            self.hand_document['chips'][player.nick] = player.chips
-            self.hand_document['winnings'][player.nick] = 0
+            self.hand_document['chips'][player.queue_id] = player.chips
+            self.hand_document['winnings'][player.queue_id] = 0
 
     def _deal(self):
         self.last_action = None
@@ -195,13 +203,13 @@ class GameHand:
             p.amount_bet = 0
             if i == 0:
                 p.put_sb()
-                self.hand_document['actions'][self.street_act].append({'code': 'SB', 'amount': p.amount_bet, 'player': p.nick})
+                self.hand_document['actions'][self.street_act].append({'code': 'SB', 'amount': p.amount_bet, 'player': p.queue_id})
             if i == 1:
                 p.put_bb()
-                self.hand_document['actions'][self.street_act].append({'code': 'BB', 'amount': p.amount_bet, 'player': p.nick})
+                self.hand_document['actions'][self.street_act].append({'code': 'BB', 'amount': p.amount_bet, 'player': p.queue_id})
             self.max_amount_bet = max(self.max_amount_bet, p.amount_bet)
             p.deal(self.deck)
-            self.hand_document['hands'][p.nick] = ''.join(Card.int_to_str(c) for c in p.hand)
+            self.hand_document['hands'][p.queue_id] = ''.join(Card.int_to_str(c) for c in p.hand)
 
         players_actable = [p for p in self.players if p.chips and not p.is_folded]
         if len(players_actable) < 2:
@@ -241,13 +249,11 @@ class GameHand:
         bet_amounts.append(self.max_amount_bet)
         pot_amounts = [0] * len(bet_amounts)
         for player in self.players:
+            prev_bet = 0
             for i, amount in enumerate(bet_amounts):
-                amount = min(player.amount_bet, amount)
+                amount = max(min(amount - prev_bet, player.amount_bet - prev_bet), 0)
                 pot_amounts[i] += amount
-        prev_amount = 0
-        for i, amount in enumerate(pot_amounts):
-            pot_amounts[i] -= prev_amount
-            prev_amount = amount
+                prev_bet = bet_amounts[i]
         return list(zip(bet_amounts, pot_amounts))
 
     def calc_prev_street_pot(self):
@@ -334,11 +340,11 @@ class GameHand:
         if len([p for p in self.players if not p.is_folded]) == 1:
             winner = [p for p in self.players if not p.is_folded][0]
             for p in self.players:
-                self.hand_document['winnings'][p.nick] -= p.amount_bet
+                self.hand_document['winnings'][p.queue_id] -= p.amount_bet
             winner.chips += self.calc_bet_pot()[0][1]
             if len(self.players) == 2 and not self.flop1:
                 self.players.reverse()
-            self.hand_document['winnings'][winner.nick] += self.calc_bet_pot()[0][1]
+            self.hand_document['winnings'][winner.queue_id] += self.calc_bet_pot()[0][1]
             self.mongo_db.insert_one(self.hand_document)
             self.send_state(None)
             time.sleep(1)
@@ -376,7 +382,7 @@ class GameHand:
                 if min_rank is None or player_ranks[player.queue_id] < min_rank:
                     min_rank = player_ranks[player.queue_id]
                     min_player = player
-                player.amount_bet -= bet
+                player.amount_bet -= bet - last_amount_bet
             last_amount_bet = bet
             self.hand_document['winnings'][min_player.nick] += pot
             min_player.chips += pot
@@ -395,8 +401,7 @@ class Game:
         self.game_config = game_config
         self.start_time = datetime.datetime.utcnow()
         self.code = code
-        self.mongo_conn = MongoClient()
-        self.mongo_db = self.mongo_conn.bordeaux_poker_db
+        self.mongo_db = get_db()
         self.tourney_id = self.mongo_db.tourneys.insert_one({'placements': {},
                                                              'players': [p.queue_id for p in self.players],
                                                              'game': os.getpid(),
@@ -475,7 +480,7 @@ class Game:
                 self.broadcast({'finished': p.nick,
                                 'place': place})
                 self.mongo_db.tourneys.update_one({'_id': self.tourney_id},
-                                                  {'$set': {f'placements.{p.nick}': place}})
+                                                  {'$set': {f'placements.{p.queue_id}': place}})
         self.players = new_players
 
     def run(self):
@@ -594,4 +599,6 @@ class SeatingListener:
             g = Game(players, self.code, credentials, self.game_config)
             g.run()
         finally:
+            r = redis.Redis()
+            r.hdel('games.start', self.code)
             requests.delete(f'http://localhost:15672/api/vhosts/{self.code}', auth=('admin', rabbitmq_admin_password))
