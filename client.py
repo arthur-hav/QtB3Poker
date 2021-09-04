@@ -13,9 +13,7 @@ from cryptography.fernet import Fernet, InvalidToken
 import json
 import base64
 
-
 sentry_sdk.init("https://bcdfdee5d8864d408aae8249eff6edc5@o968644.ingest.sentry.io/5919963")
-
 
 players_layout_6m = [
     ((400, 480), (300, 450)),
@@ -34,6 +32,7 @@ players_layout_hu = [
     ((400, 480), (300, 450)),
     ((300, 20), (420, 80)),
 ]
+
 
 class EndWidget(QWidget):
     def __init__(self):
@@ -75,6 +74,9 @@ class GameStartListener(QObject):
         if self.player_id in body['players']:
             self.game_start.emit(body['game'])
 
+    def stop(self):
+        self.channel.stop_consuming()
+
 
 class Listener(QObject):
     gamestate = pyqtSignal(dict)
@@ -87,6 +89,7 @@ class Listener(QObject):
         self.player_id = player_id
 
     def run(self):
+        self.channel.queue_purge(f'public.{self.player_id}')
         self.channel.basic_consume(f'public.{self.player_id}', on_message_callback=self.callback, auto_ack=True)
         self.channel.start_consuming()
 
@@ -97,7 +100,9 @@ class Listener(QObject):
         if 'private_to' in body:
             if body['private_to'] == self.player_id:
                 try:
-                    self.private.emit(json.loads(Fernet(self.key.encode('utf-8')).decrypt(base64.b64decode(body['data'].encode('utf-8'))).decode('utf-8')))
+                    self.private.emit(json.loads(
+                        Fernet(self.key.encode('utf-8')).decrypt(base64.b64decode(body['data'].encode('utf-8'))).decode(
+                            'utf-8')))
                 except InvalidToken:
                     pass
         else:
@@ -114,12 +119,12 @@ class Board(QWidget):
         self.setFixedSize(320, 196)
         self.f1 = QLabel(parent=self)
         self.f2 = QLabel(parent=self)
-        self.f2.move(70,0)
+        self.f2.move(70, 0)
         self.f3 = QLabel(parent=self)
-        self.f3.move(0,98)
+        self.f3.move(0, 98)
 
         self.f4 = QLabel(parent=self)
-        self.f4.move(70,98)
+        self.f4.move(70, 98)
 
         self.t1 = QLabel(parent=self)
         self.t1.move(160, 0)
@@ -157,52 +162,10 @@ class ConnectRoomTab(QWidget):
         layout.addRow(self.connect_btn)
 
 
-class HostRoomTab(QWidget):
-    code_range = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
-
-    def __init__(self, host_defaults):
-        super().__init__()
-        layout = QFormLayout()
-        self.setLayout(layout)
-        self.room_code_label = QLabel("Room code:")
-        self.room_code = QLabel(''.join(self.code_range[random.randint(0, 61)] for i in range(4)))
-        self.room_code.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
-        layout.addRow(self.room_code_label, self.room_code)
-
-        self.start_chips = QLineEdit(str(host_defaults["start_chips"]))
-        start_chips_validator = QIntValidator(100, 5000)
-        self.start_chips.setValidator(start_chips_validator)
-        layout.addRow(QLabel("Starting chips:"), self.start_chips)
-
-        self.blind_timer = QLineEdit(str(host_defaults["blind_timer"]))
-        blind_timer_validator = QIntValidator(30, 3600)
-        self.blind_timer.setValidator(blind_timer_validator)
-        layout.addRow(QLabel("Blind timer (s):"), self.blind_timer)
-
-        self.blind_percent = QLineEdit(str(host_defaults["blind_percent"]))
-        blind_percent_validator = QDoubleValidator(0, 50, 1)
-        self.blind_percent.setValidator(blind_percent_validator)
-        layout.addRow(QLabel("Blind increase %:"), self.blind_percent)
-
-        self.skim_percent = QLineEdit(str(host_defaults["skim_percent"]))
-        skim_percent_validator = QDoubleValidator(0, 20, 1)
-        self.skim_percent.setValidator(skim_percent_validator)
-        layout.addRow(QLabel("Stack skimming %:"), self.skim_percent)
-
-        self.number_seats = QLineEdit(str(host_defaults["number_seats"]))
-        number_seats_validator = QIntValidator(2, 6)
-        self.number_seats.setValidator(number_seats_validator)
-        layout.addRow(QLabel("Number of seats"), self.number_seats)
-
-        self.connect_btn = QPushButton()
-        self.connect_btn.setText('Host')
-        layout.addRow(self.connect_btn)
-
-
 class MainConnectWindow(QWidget):
     press_tutorial = pyqtSignal()
 
-    def __init__(self, default_nickname, default_server, host_defaults):
+    def __init__(self, default_nickname, default_server):
         super().__init__()
         layout = QVBoxLayout()
 
@@ -215,22 +178,16 @@ class MainConnectWindow(QWidget):
         self.top_window.login_failure.connect(self.push_auth_fail)
         layout.addWidget(self.top_window)
 
-        self.connect_option_tabs = QTabWidget()
-        self.connect_room_tab = ConnectRoomTab()
-        self.host_room_tab = HostRoomTab(host_defaults)
-        self.connect_option_tabs.addTab(self.connect_room_tab, 'Join room')
-        self.connect_option_tabs.addTab(self.host_room_tab, 'Host room')
         layout.addWidget(self.connect_option_tabs)
         self.connect_option_tabs.hide()
         self.setLayout(layout)
-        self.games_listing = GamesWindow()
-        layout.addWidget(self.games_listing)
         self.query_logs = EventLog()
         self.query_logs.setFixedHeight(60)
         layout.addWidget(self.query_logs)
 
     def push_auth_fail(self, msg):
         self.query_logs.push_message(msg)
+
 
 class TopConnectWindow(QWidget):
     login_success = pyqtSignal(str, str, list, str, str)
@@ -278,6 +235,7 @@ class TopConnectWindow(QWidget):
         if 'status' in resp_data and resp_data['status'] == 'success':
             self.register_success.emit()
 
+
 class BetAmountWidget(QWidget):
     def __init__(self, nb_cols=2):
         super().__init__()
@@ -294,7 +252,7 @@ class BetAmountWidget(QWidget):
             for j in range(nb_cols):
                 self.chips.append(QLabel())
                 self.chips[-1].setParent(self)
-                self.chips[-1].move(0 + 30*j, 28 - 4 * i)
+                self.chips[-1].move(0 + 30 * j, 28 - 4 * i)
 
     def set_amount(self, amount):
         if not amount:
@@ -321,7 +279,7 @@ class BetAmountWidget(QWidget):
                 chip.setPixmap(pxmap)
                 chip.show()
                 i += 1 if nb_chips_needed >= 8 else self.nb_cols
-        self.text_widget.move(40 if nb_chips_needed < 8 else 8 + 30*self.nb_cols, 28)
+        self.text_widget.move(40 if nb_chips_needed < 8 else 8 + 30 * self.nb_cols, 28)
         self.show()
 
 
@@ -527,7 +485,7 @@ class BetActions(QWidget):
         self.hide()
 
     def raise_changed(self, value):
-         self.bet.setText(f'Raise {value}')
+        self.bet.setText(f'Raise {value}')
 
 
 class PokerTableWidget(QWidget):
@@ -691,7 +649,6 @@ class Game(QObject):
         self.listener = Listener(l_channel, user_id, key)
         self.listener.moveToThread(self.listener_thread)
         self.listener.gamestate.connect(self.on_recv)
-        self.listener.private.connect(self.on_recv_private)
         self.listener_thread.started.connect(self.listener.run)
         self.timer_mutex = QMutex()
         self.poker_timer = PokerTimer()
@@ -699,10 +656,13 @@ class Game(QObject):
         self.poker_timer.moveToThread(self.poker_timer_thread)
         self.poker_timer_thread.started.connect(self.poker_timer.run)
         self.poker_timer.timer_sig.connect(self.decrease_timer)
-        self.poker_table.bet_actions.call.pressed.connect(self.call_btn)
-        self.poker_table.bet_actions.fold.pressed.connect(self.fold_btn)
-        self.poker_table.bet_actions.bet.pressed.connect(self.bet_btn)
-        self.poker_table.reconnect.pressed.connect(self.reconnect)
+        self.poker_table.die.connect(self.done)
+        if not spectate_only:
+            self.listener.private.connect(self.on_recv_private)
+            self.poker_table.bet_actions.call.pressed.connect(self.call_btn)
+            self.poker_table.bet_actions.fold.pressed.connect(self.fold_btn)
+            self.poker_table.bet_actions.bet.pressed.connect(self.bet_btn)
+            self.poker_table.reconnect.pressed.connect(self.reconnect)
 
     def create_game(self):
         # TODO
@@ -713,8 +673,8 @@ class Game(QObject):
                          'number_seats': int(self.room_tab.number_seats.text())}
 
     def start(self):
-        self.channel.queue_purge(f'public.{self.user_id}')
-        self.reconnect()
+        if self.channel:
+            self.reconnect()
         self.listener_thread.start()
 
     def call_btn(self):
@@ -770,13 +730,15 @@ class Game(QObject):
         self.poker_table.setToCall(gamestate.get('to_call'))
         self.poker_table.setRaiseSize(gamestate.get('min_raise'), gamestate.get('nl_raise'))
         self.poker_table.bet_actions.bet.setText(f'Raise {self.poker_table.bet_actions.raise_group.raise_size}')
-        self.poker_table.bet_actions.call.setText(f'Call {self.poker_table.to_call}' if self.poker_table.to_call else 'Check')
+        self.poker_table.bet_actions.call.setText(
+            f'Call {self.poker_table.to_call}' if self.poker_table.to_call else 'Check')
         if not self.poker_table.to_call:
             self.poker_table.bet_actions.fold.hide()
         else:
             self.poker_table.bet_actions.fold.show()
         if 'holes' in gamestate:
-            self.poker_table.players[0].setHoles([gamestate['holes'][0:2], gamestate['holes'][2:4], gamestate['holes'][4:]])
+            self.poker_table.players[0].setHoles(
+                [gamestate['holes'][0:2], gamestate['holes'][2:4], gamestate['holes'][4:]])
         if 'log' in gamestate:
             self.poker_table.event_log.push_message(gamestate.get('log'))
 
@@ -785,23 +747,43 @@ class Game(QObject):
         self.poker_timer.done = True
 
 
+class ConnectBtnConnector:
+    def __init__(self, callback, game_id, spectate_only):
+        self.callback = callback
+        self.game_id = game_id
+        self.spectate_only = spectate_only
+
+    def __call__(self):
+        self.callback(self.game_id, self.spectate_only)
+
+
 class GamesWindow(QScrollArea):
-    def __init__(self):
+    connect_signal = pyqtSignal(str, bool)
+
+    def __init__(self, player_id):
         super().__init__()
         self.games = []
-        self.layout = QHBoxLayout()
-        self.setLayout(self.layout)
+        self.signals = []
+        self.player_id = player_id
+        self._layout = QGridLayout()
+        self.setLayout(self._layout)
 
     def query_games(self, server, token):
         resp = requests.get(f'https://{server}/list_games', headers={'Authorization': token})
 
         if not resp.json() or not resp.json()['status'] == 'success':
             return
-        for game in self.games:
+        for i, (game, players) in enumerate(resp.json()['games'].items()):
+            player_count = QLabel(str(len(players)))
             label = QLabel(game)
-            self.layout.addWidget(label)
+            join = QPushButton()
+            join.setText("Observe" if self.player_id not in players else "Take seat")
+            self.signals.append(ConnectBtnConnector(self.connect_signal.emit, game, self.player_id not in players))
+            join.pressed.connect(self.signals[-1])
+            self._layout.addWidget(label, i, 1)
+            self._layout.addWidget(player_count, i, 2)
+            self._layout.addWidget(join, i, 3)
             self.games.append(game)
-
 
 
 class MainWindow(QMainWindow):
@@ -810,9 +792,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.setWindowTitle('Bordeaux 3')
-        self.connect_window = MainConnectWindow(self.config["nickname"],
-                                                self.config["server"],
-                                                self.config['room_host_defaults'])
+        self.connect_window = MainConnectWindow(self.config.get("nickname", ''),
+                                                self.config.get("server", ''))
         self.connect_window.top_window.login_success.connect(self.show_games)
         self.connect_window.top_window.register_success.connect(self.log_success_register)
         self.connect_window.press_tutorial.connect(self.set_tutorial)
@@ -842,15 +823,17 @@ class MainWindow(QMainWindow):
         self.password = password
         self.key = key
         self.connect_window.top_window.hide()
-        self.connect_window.games_listing.query_games(self.connect_window.top_window.fqdn.text(), token)
-        self.connect_window.games_listing.show()
+        games_listing = GamesWindow(self.user_id)
+        games_listing.query_games(self.connect_window.top_window.fqdn.text(), token)
+        games_listing.connect_signal.connect(self.on_recv)
+        self.connect_window.layout().insertWidget(3, games_listing)
+        games_listing.show()
         auth = pika.PlainCredentials(user_id, password)
         conn = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
-                                                                                5672,
-                                                                                'game_start',
-                                                                                credentials=auth))
+                                                                 5672,
+                                                                 'game_start',
+                                                                 credentials=auth))
         channel = conn.channel()
-
         self.game_listener = GameStartListener(channel, user_id)
         self.game_listener.moveToThread(self.game_listener_thread)
         self.game_listener.game_start.connect(self.on_recv)
@@ -859,21 +842,28 @@ class MainWindow(QMainWindow):
         for game in games:
             self.on_recv(game)
 
-    def on_recv(self, game_id):
+    def on_recv(self, game_id, observe_only=False):
         auth = pika.PlainCredentials(self.user_id, self.password)
         nickname = self.connect_window.top_window.nickname.text()
         try:
+            if observe_only:
+                resp = requests.get(f'https://{self.connect_window.top_window.fqdn.text()}/spectate/{game_id}',
+                                    headers={'Authorization': self.token})
+                print(resp.text)
+                w_channel = None
+            else:
+                w_connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
+                                              5672,
+                                              str(game_id),
+                                              credentials=auth))
+                w_channel = w_connection.channel()
             l_connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
                                                                              5672,
                                                                              str(game_id),
                                                                              credentials=auth))
-            w_connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
-                                                                             5672,
-                                                                             str(game_id),
-                                                                             credentials=auth))
             l_channel = l_connection.channel()
-            w_channel = w_connection.channel()
-            self.games[game_id] = Game(nickname, l_channel, w_channel, False, self.user_id, self.key)
+            self.games[game_id] = Game(nickname, l_channel, w_channel, observe_only, self.user_id, self.key)
             self.games[game_id].start()
         except Exception as e:
             print(e)
@@ -887,7 +877,10 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication([])
-    config = yaml.safe_load(open("conf.yml", "r"))
+    try:
+        config = yaml.safe_load(open("conf.yml", "r"))
+    except (OSError, yaml.YAMLError):
+        config = {}
     mw = MainWindow(config)
     mw.show()
     app.exec_()

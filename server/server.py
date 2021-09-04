@@ -19,7 +19,6 @@ import redis
 import logging
 import yaml
 
-
 logger = logging.getLogger()
 
 
@@ -114,8 +113,8 @@ class Human(Player):
             self.street_amount_bet += amount_called
             self.chips -= amount_called
             gamehand.hand_document['actions'][gamehand.street_act].append({'code': 'C',
-                                                                'player': self.nick,
-                                                                'amount': amount_called})
+                                                                           'player': self.queue_id,
+                                                                           'amount': amount_called})
             gamehand.last_action = 'check' if not amount_called else 'call'
         elif action.lower().startswith('r'):
             amount_raised = min(int(action.lower()[2:]), self.chips)
@@ -123,18 +122,18 @@ class Human(Player):
             self.street_amount_bet += amount_raised
             self.chips -= amount_raised
             gamehand.hand_document['actions'][gamehand.street_act].append({'code': 'R',
-                                                                'player': self.nick,
-                                                                'amount': amount_raised})
+                                                                           'player': self.queue_id,
+                                                                           'amount': amount_raised})
             gamehand.last_action = 'raise'
         else:
             self.is_folded = True
             gamehand.hand_document['actions'][gamehand.street_act].append({'code': 'F',
-                                                                'player': self.nick})
+                                                                           'player': self.queue_id})
             gamehand.last_action = 'fold'
 
     def read_queue(self, code, credentials):
         connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, code,
-                                                          credentials=credentials))
+                                                                       credentials=credentials))
         channel = connection.channel()
         channel.queue_declare('game' + '.' + self.queue_id, auto_delete=True)
         channel.queue_bind(exchange='poker_exchange',
@@ -203,10 +202,12 @@ class GameHand:
             p.amount_bet = 0
             if i == 0:
                 p.put_sb()
-                self.hand_document['actions'][self.street_act].append({'code': 'SB', 'amount': p.amount_bet, 'player': p.queue_id})
+                self.hand_document['actions'][self.street_act].append(
+                    {'code': 'SB', 'amount': p.amount_bet, 'player': p.queue_id})
             if i == 1:
                 p.put_bb()
-                self.hand_document['actions'][self.street_act].append({'code': 'BB', 'amount': p.amount_bet, 'player': p.queue_id})
+                self.hand_document['actions'][self.street_act].append(
+                    {'code': 'BB', 'amount': p.amount_bet, 'player': p.queue_id})
             self.max_amount_bet = max(self.max_amount_bet, p.amount_bet)
             p.deal(self.deck)
             self.hand_document['hands'][p.queue_id] = ''.join(Card.int_to_str(c) for c in p.hand)
@@ -267,7 +268,8 @@ class GameHand:
     def send_state(self, to_act, showdown=None):
         btn_player = self.get_btn_player()
         common = {
-            'board': ''.join(Card.int_to_str(c) for c in self.flop1+self.flop2+self.turn1+self.turn2+self.river),
+            'board': ''.join(
+                Card.int_to_str(c) for c in self.flop1 + self.flop2 + self.turn1 + self.turn2 + self.river),
             'active': to_act.nick if to_act else None,
             'prev_pot': self.calc_prev_street_pot(),
             'pot': [bp[1] for bp in self.calc_bet_pot()],
@@ -292,7 +294,7 @@ class GameHand:
             for i, player in enumerate(self.players):
                 if self.flop1:
                     min_raise = max(2 * (self.max_amount_bet - player.amount_bet), 10)
-                else:   # preflop
+                else:  # preflop
                     min_raise = self.min_raise + self.max_amount_bet - player.amount_bet
                 min_raise = min(min_raise, player.chips)
                 to_call = min(self.max_amount_bet - player.amount_bet, player.chips)
@@ -355,7 +357,7 @@ class GameHand:
         ev = evaluator.Evaluator()
 
         for p in self.players:
-            self.hand_document['winnings'][p.nick] -= p.amount_bet
+            self.hand_document['winnings'][p.queue_id] -= p.amount_bet
 
         player_ranks = {}
         players_comb = {}
@@ -384,10 +386,9 @@ class GameHand:
                     min_player = player
                 player.amount_bet -= bet - last_amount_bet
             last_amount_bet = bet
-            self.hand_document['winnings'][min_player.nick] += pot
+            self.hand_document['winnings'][min_player.queue_id] += pot
             min_player.chips += pot
             self.send_state(None, showdown=players_comb[min_player.queue_id])
-            logger.info("%s %s %s", bet, pot, min_player.nick)
             time.sleep(3)
 
         self.mongo_db.insert_one(self.hand_document)

@@ -25,6 +25,7 @@ def token_required(f):
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError) as e:
             return {'error': f'Missing or invalid authentication token: {str(e)}'}
         return f(payload['sub'], *args, **kwargs)
+
     return decorated_function
 
 
@@ -100,7 +101,7 @@ def login():
         games = list(db.tourneys.find({'players': {'$in': [str(user['_id'])]}, 'game': {'$exists': True}}))
         r = redis.Redis()
         r.set(f'session.{user["_id"]}.key', key)
-        r.expire(f'session.{user["_id"]}.key', 60*60*24)  # One day key storing
+        r.expire(f'session.{user["_id"]}.key', 60 * 60 * 24)  # One day key storing
         return {'status': 'success',
                 'token': get_token(user['_id']).decode('utf-8'),
                 'key': key.decode('utf-8'),
@@ -120,6 +121,7 @@ def create_game(user_id):
     p = mp.Process(target=server.SeatingListener, args=(game_config, users))
     p.start()
     r.hset('games.start', p.pid, datetime.datetime.utcnow().timestamp())
+    r.lpush(f'games.{p.pid}.players', *[str(u['_id']) for u in users])
     return {'status': 'success', 'server_id': p.pid}
 
 
@@ -128,12 +130,39 @@ def create_game(user_id):
 def list_games(user_id):
     r = redis.Redis()
     to_del = []
-    to_return = []
+    games = []
+    game_data = {}
     for k, v in r.hscan_iter('games.start'):
-        if datetime.datetime.utcnow().timestamp() - float(v.decode('utf-8')) > 60*60*24:
+        if datetime.datetime.utcnow().timestamp() - float(v.decode('utf-8')) > 60 * 60 * 24:
             to_del.append(k)
         else:
-            to_return.append(k)
+            games.append(k.decode('utf-8'))
     if to_del:
         r.hdel('games.start', *to_del)
-    return {'status': 'success', 'games': [g.decode('utf-8') for g in to_return]}
+        r.delete(*[f'games.{key}.players' for key in to_del])
+    for game in games:
+        game_data[game] = [p.decode('utf-8') for p in r.lrange(f'games.{game}.players', 0, -1)]
+    return {'status': 'success', 'games': game_data}
+
+
+@app.route("/spectate/<game>")
+@token_required
+def spectate(user_id, game):
+    rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
+    requests.put(f'http://localhost:15672/api/permissions/{game}/{user_id}',
+                 auth=('admin', rabbitmq_admin_password),
+                 data=json.dumps({"configure": "$^",
+                                  "write": '$^',
+                                  "read": f'public.{user_id}'}))
+    credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
+    conn = pika.BlockingConnection(pika.ConnectionParameters('localhost',
+                                                             5672,
+                                                             str(game),
+                                                             credentials=credentials))
+    channel = conn.channel()
+    channel.queue_declare(f'public.{user_id}')
+    channel.queue_bind(exchange='poker_exchange',
+                       queue=f'public.{user_id}',
+                       routing_key='public')
+
+    return {'status': 'success'}
