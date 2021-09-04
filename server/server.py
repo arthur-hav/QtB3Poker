@@ -595,7 +595,7 @@ class SeatingListener:
 
         try:
             now = datetime.datetime.utcnow()
-            start_time = datetime.datetime.utcfromtimestamp(game_config['start_time'])
+            start_time = datetime.datetime.utcfromtimestamp(game_config.get('start_time', 0))
             time.sleep(max((start_time - now).total_seconds(), 0))
             g = Game(players, self.code, credentials, self.game_config)
             g.run()

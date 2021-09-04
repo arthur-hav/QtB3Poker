@@ -7,6 +7,7 @@ import datetime
 from passlib.hash import sha256_crypt
 import os
 from pymongo import MongoClient
+from bson.objectid import ObjectId
 import multiprocessing as mp
 from .server import SeatingListener
 from cryptography.fernet import Fernet
@@ -39,6 +40,24 @@ def get_db():
     mongodb_user, mongodb_password = read_yaml['mongodb']['user'], read_yaml['mongodb']['password']
     pmc = MongoClient('mongodb://%s:%s@127.0.0.1' % (mongodb_user, mongodb_password))
     return pmc.bordeaux_poker_db
+
+
+def update_send(queue_id):
+    rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
+    credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
+    connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, 'game_start',
+                                                                   credentials=credentials))
+    r = redis.Redis()
+    players = [p.decode('utf-8') for p in r.sscan_iter(f'queue.{queue_id}.players')]
+    channel = connection.channel()
+    channel.exchange_declare(exchange='public', exchange_type='fanout')
+    channel.basic_publish(exchange='public',
+                          routing_key='public',
+                          body=json.dumps({'queue': queue_id, 'players': players}).encode('utf-8'))
+
+
+def logout_player():
+    pass
 
 
 def rand_key():
@@ -100,6 +119,7 @@ def login():
 
         games = list(db.tourneys.find({'players': {'$in': [str(user['_id'])]}, 'game': {'$exists': True}}))
         r = redis.Redis()
+        # r.sadd(f'session.keys', str(user['_id']))  ## Might be useful for later
         r.set(f'session.{user["_id"]}.key', key)
         r.expire(f'session.{user["_id"]}.key', 60 * 60 * 24)  # One day key storing
         return {'status': 'success',
@@ -132,20 +152,27 @@ def list_games(user_id):
     to_del = []
     games = []
     game_data = {}
+    queue_data = {}
     for k, v in r.hscan_iter('games.start'):
         if datetime.datetime.utcnow().timestamp() - float(v.decode('utf-8')) > 60 * 60 * 24:
             to_del.append(k)
         else:
             games.append(k.decode('utf-8'))
+    for queue_bytes in r.sscan_iter('queue.keys'):
+        queue_id = queue_bytes.decode('utf-8')
+        nb_seats = int(r.hget(f'queue.{queue_id}.config', b'nb_seats'))
+        queue_data[queue_id] = {'players': [player.decode('utf-8')
+                                            for player in r.sscan_iter(f'queue.{queue_id}.players')],
+                                'seats': nb_seats}
     if to_del:
         r.hdel('games.start', *to_del)
         r.delete(*[f'games.{key}.players' for key in to_del])
     for game in games:
-        game_data[game] = [p.decode('utf-8') for p in r.lrange(f'games.{game}.players', 0, -1)]
-    return {'status': 'success', 'games': game_data}
+        game_data[game] = [p.decode('utf-8') for p in r.sscan_iter(f'games.{game}.players')]
+    return {'status': 'success', 'games': game_data, 'queues': queue_data}
 
 
-@app.route("/spectate/<game>")
+@app.route("/spectate/<game>", methods=["POST"])
 @token_required
 def spectate(user_id, game):
     rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
@@ -165,4 +192,39 @@ def spectate(user_id, game):
                        queue=f'public.{user_id}',
                        routing_key='public')
 
+    return {'status': 'success'}
+
+
+@app.route('/queue/<queue_key>')
+@token_required
+def queue(user_id, queue_key):
+    update_send(queue_key)
+    r = redis.Redis()
+    if r.sismember(f'queue.{queue_key}.players', user_id):
+        r.srem(f'queue.{queue_key}.players', user_id)
+        return {'status': 'success'}
+    r.sadd(f'queue.{queue_key}.players', user_id)
+    nb_seats = int(r.hget(f'queue.{queue_key}.config', b'nb_seats'))
+    user_list = list(r.sscan_iter(f'queue.{queue_key}.players'))
+    if len(user_list) >= nb_seats:
+        db = get_db()
+        users = list(db.users.find({'_id': {'$in': [ObjectId(u.decode('utf-8')) for u in user_list]}}))
+        game_config = dict((k.decode('utf-8'), float(v.decode('utf-8')))
+                           for k, v in r.hscan_iter(f'queue.{queue_key}.config'))
+
+        p = mp.Process(target=server.SeatingListener, args=(game_config, users))
+        p.start()
+        r.hset('games.start', p.pid, datetime.datetime.utcnow().timestamp())
+        r.sadd(f'games.{p.pid}.players', *user_list)
+        r.delete(f'queue.{queue_key}.players')
+    return {'status': 'success'}
+
+
+@app.route('/create_queue/<queue_key>', methods=["POST"])
+@token_required
+def create_queue(user_id, queue_key):
+    game_config = json.loads(request.form['server_config'])
+    r = redis.Redis()
+    r.sadd('queue.keys', queue_key)
+    r.hset(f'queue.{queue_key}.config', mapping=game_config)
     return {'status': 'success'}

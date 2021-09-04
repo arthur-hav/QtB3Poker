@@ -59,6 +59,7 @@ class PokerTimer(QObject):
 
 class GameStartListener(QObject):
     game_start = pyqtSignal(str)
+    queue_update = pyqtSignal()
 
     def __init__(self, channel, player_id):
         super().__init__()
@@ -70,8 +71,9 @@ class GameStartListener(QObject):
         self.channel.start_consuming()
 
     def callback(self, ch, method, properties, body):
+        self.queue_update.emit()
         body = json.loads(body.decode('utf-8'))
-        if self.player_id in body['players']:
+        if 'game'in body and self.player_id in body['players']:
             self.game_start.emit(body['game'])
 
     def stop(self):
@@ -178,8 +180,6 @@ class MainConnectWindow(QWidget):
         self.top_window.login_failure.connect(self.push_auth_fail)
         layout.addWidget(self.top_window)
 
-        layout.addWidget(self.connect_option_tabs)
-        self.connect_option_tabs.hide()
         self.setLayout(layout)
         self.query_logs = EventLog()
         self.query_logs.setFixedHeight(60)
@@ -748,32 +748,49 @@ class Game(QObject):
 
 
 class ConnectBtnConnector:
-    def __init__(self, callback, game_id, spectate_only):
+    def __init__(self, callback, *args):
         self.callback = callback
-        self.game_id = game_id
-        self.spectate_only = spectate_only
+        self.args = args
 
     def __call__(self):
-        self.callback(self.game_id, self.spectate_only)
+        self.callback(*self.args)
 
 
 class GamesWindow(QScrollArea):
     connect_signal = pyqtSignal(str, bool)
+    queue_signal = pyqtSignal(str)
 
-    def __init__(self, player_id):
+    def __init__(self, player_id, server, token):
         super().__init__()
         self.games = []
         self.signals = []
+        self.server = server
+        self.token = token
         self.player_id = player_id
         self._layout = QGridLayout()
         self.setLayout(self._layout)
 
-    def query_games(self, server, token):
-        resp = requests.get(f'https://{server}/list_games', headers={'Authorization': token})
-
+    def query_games(self):
+        self.games = []
+        self.signals = []
+        for i in reversed(range(self._layout.count())):
+            self._layout.itemAt(i).widget().setParent(None)
+        resp = requests.get(f'https://{self.server}/list_games', headers={'Authorization': self.token})
         if not resp.json() or not resp.json()['status'] == 'success':
             return
-        for i, (game, players) in enumerate(resp.json()['games'].items()):
+        for i, (queue, data) in enumerate(resp.json()['queues'].items()):
+            player_count = QLabel(f'{len(data["players"])} / {data["seats"]}')
+            label = QLabel(queue)
+            join = QPushButton()
+            join.setText("Subscribe" if self.player_id not in data['players'] else "Unsubscribe")
+            self.signals.append(ConnectBtnConnector(self.queue_signal.emit, queue))
+            join.pressed.connect(self.signals[-1])
+            self._layout.addWidget(label, i, 1)
+            self._layout.addWidget(player_count, i, 2)
+            self._layout.addWidget(join, i, 3)
+            self.games.append(queue)
+        next_to_add = len(self.games)
+        for i, (game, players) in enumerate(resp.json()['games'].items(), start=next_to_add):
             player_count = QLabel(str(len(players)))
             label = QLabel(game)
             join = QPushButton()
@@ -784,7 +801,6 @@ class GamesWindow(QScrollArea):
             self._layout.addWidget(player_count, i, 2)
             self._layout.addWidget(join, i, 3)
             self.games.append(game)
-
 
 class MainWindow(QMainWindow):
 
@@ -823,11 +839,13 @@ class MainWindow(QMainWindow):
         self.password = password
         self.key = key
         self.connect_window.top_window.hide()
-        games_listing = GamesWindow(self.user_id)
-        games_listing.query_games(self.connect_window.top_window.fqdn.text(), token)
-        games_listing.connect_signal.connect(self.on_recv)
-        self.connect_window.layout().insertWidget(3, games_listing)
-        games_listing.show()
+        self.games_listing = GamesWindow(self.user_id, self.connect_window.top_window.fqdn.text(), token)
+        self.games_listing.connect_signal.connect(self.on_recv)
+        self.games_listing.queue_signal.connect(self.queue)
+        self.games_listing.query_games()
+
+        self.connect_window.layout().insertWidget(2, self.games_listing)
+        self.games_listing.show()
         auth = pika.PlainCredentials(user_id, password)
         conn = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
                                                                  5672,
@@ -837,10 +855,15 @@ class MainWindow(QMainWindow):
         self.game_listener = GameStartListener(channel, user_id)
         self.game_listener.moveToThread(self.game_listener_thread)
         self.game_listener.game_start.connect(self.on_recv)
+        self.game_listener.queue_update.connect(self.games_listing.query_games)
         self.game_listener_thread.started.connect(self.game_listener.run)
         self.game_listener_thread.start()
         for game in games:
             self.on_recv(game)
+
+    def queue(self, queue_id):
+        requests.get(f'https://{self.connect_window.top_window.fqdn.text()}/queue/{queue_id}',
+                     headers={'Authorization': self.token})
 
     def on_recv(self, game_id, observe_only=False):
         auth = pika.PlainCredentials(self.user_id, self.password)
