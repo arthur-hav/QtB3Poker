@@ -422,7 +422,7 @@ class Game:
             if p.key:
                 p.key = Fernet(p.key)
                 p.disconnected = False
-            p.chips = game_config['start_chips']
+            p.chips = int(game_config['start_chips'])
             self.channel.queue_declare(f'public.{p.queue_id}')
             self.channel.queue_bind(exchange='poker_exchange',
                                     queue=f'public.{p.queue_id}',
