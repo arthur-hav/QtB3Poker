@@ -389,7 +389,7 @@ class GameHand:
             self.hand_document['winnings'][min_player.queue_id] += pot
             min_player.chips += pot
             self.send_state(None, showdown=players_comb[min_player.queue_id])
-            time.sleep(3)
+            time.sleep(3.5)
 
         self.mongo_db.insert_one(self.hand_document)
 
@@ -555,7 +555,7 @@ class Game:
             if next_hand:
                 continue
             hand.showdown()
-            time.sleep(2)
+            time.sleep(1)
             self.check_eliminated()
         if self.players:
             self.send_player(self.players[0].queue_id, {'log': 'You won the tournament!'})
