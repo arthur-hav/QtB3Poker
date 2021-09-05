@@ -228,3 +228,27 @@ def create_queue(user_id, queue_key):
     r.sadd('queue.keys', queue_key)
     r.hset(f'queue.{queue_key}.config', mapping=game_config)
     return {'status': 'success'}
+
+
+@app.route('/transfer_coins', methods=["POST"])
+@token_required
+def transfer_coins(user_id):
+    ledger = json.loads(request.form['data'])
+    updated_players = []
+    for player, value in ledger.items():
+        db = get_db()
+        player = db.users.find_one({'login': player})
+        if player['coins'] + value < 0:
+            continue
+        db.users.update_one({'login': player}, {'coins': {'$set': player['coins'] + value}})
+        updated_players.append(str(player['_id']))
+    return {'status': 'success', 'updated_players': updated_players}
+
+
+@app.route('/get_coins')
+@token_required
+def get_coins(user_id):
+    db = get_db()
+    user = db.users.find_one({'_id': ObjectId(user_id)})
+    if user:
+        return {'status': 'success', 'balance': user['coins']}
