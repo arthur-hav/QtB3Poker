@@ -140,7 +140,7 @@ def login():
         r.set(f'session.{user["_id"]}.key', key)
         r.expire(f'session.{user["_id"]}.key', 60 * 60 * 24)  # One day key storing
         return {'status': 'success',
-                'token': get_token(user['_id']).decode('utf-8'),
+                'token': get_token(str(user['_id'])).decode('utf-8'),
                 'key': key.decode('utf-8'),
                 'id': str(user['_id']),
                 'games': [g['game'] for g in games if psutil.pid_exists(g['game'])]}
