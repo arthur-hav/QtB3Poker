@@ -158,7 +158,7 @@ def create_game(user_id):
     p = mp.Process(target=server.SeatingListener, args=(game_config, users))
     p.start()
     r.hset('games.start', p.pid, datetime.datetime.utcnow().timestamp())
-    r.lpush(f'games.{p.pid}.players', *[str(u['_id']) for u in users])
+    r.sadd(f'games.{p.pid}.players', *[str(u['_id']) for u in users])
     return {'status': 'success', 'server_id': p.pid}
 
 
