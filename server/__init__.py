@@ -39,9 +39,9 @@ def admin_required(f):
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError) as e:
             return {'error': f'Missing or invalid authentication token: {str(e)}'}
         db = get_db()
-        admin_user = db.usersf.find_one({'_id': ObjectId(payload['sub'])})
+        admin_user = db.users.find_one({'_id': ObjectId(payload['sub'])})
         if not admin_user or 'admin' not in admin_user:
-            return {'status': 'fail', 'reason': 'Require privileged user', 'test': payload['sub']}
+            return {'status': 'fail', 'reason': 'Require privileged user'}
         return f(payload['sub'], *args, **kwargs)
 
     return decorated_function
