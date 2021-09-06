@@ -450,9 +450,8 @@ def average_rank():
     import pprint
     pprint.pprint(rankings)
 
-average_rank()
+# average_rank()
 
-import rankings
-
-r = rankings.rankings
-
+r = elo_tourney.tourney
+import pprint
+pprint.pprint(sorted(r.keys(), key=lambda k: r[k]), width=100, compact=False)
