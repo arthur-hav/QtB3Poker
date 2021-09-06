@@ -247,6 +247,8 @@ def create_queue(user_id, queue_key):
     return {'status': 'success'}
 
 
+## Work in progress endpoints
+
 @app.route('/transfer_currency/<currency>', methods=["POST"])
 @admin_required
 def transfer_currency(user_id, currency):

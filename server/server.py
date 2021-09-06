@@ -397,7 +397,7 @@ class Game:
         self.players = [Player(self,
                                p['login'],
                                str(p['_id']),
-                               r.get(f'session.{p.queue_id}.key'),
+                               r.get(f'session.{p["_id"]}.key'),
                                int(game_config['start_chips']))
                         for p in players]
         self.connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, code,
