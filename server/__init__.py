@@ -30,6 +30,23 @@ def token_required(f):
     return decorated_function
 
 
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        try:
+            auth_token = request.headers.get('Authorization')
+            payload = jwt.decode(auth_token, os.getenv('JWT_TOKEN', 'unsafe_for_production'))
+        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError) as e:
+            return {'error': f'Missing or invalid authentication token: {str(e)}'}
+        db = get_db()
+        admin_user = db.usersf.find_one({'_id': ObjectId(payload['sub'])})
+        if 'admin' not in admin_user:
+            return {'status': 'fail', 'reason': 'Require privileged user'}
+        return f(payload['sub'], *args, **kwargs)
+
+    return decorated_function
+
+
 if __name__ == '__main__':
     mp.set_start_method('spawn')
 app = Flask(__name__)
@@ -131,7 +148,7 @@ def login():
 
 
 @app.route("/create_game", methods=['POST'])
-@token_required
+@admin_required
 def create_game(user_id):
     db = get_db()
     game_config = json.loads(request.form['server_config'])
@@ -221,7 +238,7 @@ def queue(user_id, queue_key):
 
 
 @app.route('/create_queue/<queue_key>', methods=["POST"])
-@token_required
+@admin_required
 def create_queue(user_id, queue_key):
     game_config = json.loads(request.form['server_config'])
     r = redis.Redis()
@@ -230,25 +247,24 @@ def create_queue(user_id, queue_key):
     return {'status': 'success'}
 
 
-@app.route('/transfer_coins', methods=["POST"])
-@token_required
-def transfer_coins(user_id):
+@app.route('/transfer_currency/<currency>', methods=["POST"])
+@admin_required
+def transfer_currency(user_id, currency):
     ledger = json.loads(request.form['data'])
     updated_players = []
     for player, value in ledger.items():
-        db = get_db()
         player = db.users.find_one({'login': player})
-        if player['coins'] + value < 0:
+        if player.get(currency, 0) + value < 0:
             continue
-        db.users.update_one({'login': player}, {'coins': {'$set': player['coins'] + value}})
+        db.users.update_one({'login': player}, {currency: {'$set': player.get(currency, 0) + value}})
         updated_players.append(str(player['_id']))
     return {'status': 'success', 'updated_players': updated_players}
 
 
-@app.route('/get_coins')
+@app.route('/get_balance/<currency>')
 @token_required
-def get_coins(user_id):
+def get_balance(user_id, currency):
     db = get_db()
     user = db.users.find_one({'_id': ObjectId(user_id)})
     if user:
-        return {'status': 'success', 'balance': user['coins']}
+        return {'status': 'success', 'balance': user.get(currency, 0)}
