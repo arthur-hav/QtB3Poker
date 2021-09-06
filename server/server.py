@@ -483,6 +483,9 @@ class Game:
     def run(self):
         nb_hands = 0
         self.game_start_send(self.credentials)
+        now = datetime.datetime.utcnow()
+        start_time = datetime.datetime.utcfromtimestamp(self.game_config.get('start_time', 0))
+        time.sleep(max((start_time - now).total_seconds(), 0))
         all_connect_timeout = self.game_config['all_connect_timeout']
         while [p for p in self.players if p.disconnected]:
             time.sleep(2)
@@ -596,9 +599,6 @@ class SeatingListener:
         credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
 
         try:
-            now = datetime.datetime.utcnow()
-            start_time = datetime.datetime.utcfromtimestamp(game_config.get('start_time', 0))
-            time.sleep(max((start_time - now).total_seconds(), 0))
             g = Game(players, self.code, credentials, self.game_config)
             g.run()
         finally:

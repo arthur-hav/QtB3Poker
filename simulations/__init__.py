@@ -7,6 +7,8 @@ from collections import defaultdict
 import networkx as nx
 import Levenshtein as lev
 import re
+import elo_tourney
+import bisect
 
 ev = evaluator.Evaluator()
 
@@ -83,6 +85,17 @@ def suit_group_notation(hand, grouped=True):
     return pair_prefix + ''.join(
         ranks[Card.get_rank_int(c)] for c in sorted(sorted_cards, key=lambda c: -Card.get_rank_int(c)))
 
+
+def cards_from_suit_group(suit_group_hand):
+    cards = []
+    suits = ['c', 'd', 'h' 's']
+    random.shuffle(suits)
+    for suit_group in re.findall(r'([AKQJT98765432]|(\([AKQJT98765432]+\)))', suit_group_hand):
+        suit_group = suit_group[0].replace('(', '').replace(')', '')
+        suit = suits.pop()
+        for rank in suit_group:
+            cards.append(Card.new(rank+suit))
+    return cards
 
 def distance(d1, d2):
     return int((sum(d1) - sum(d2)) ** 2)
@@ -346,19 +359,60 @@ def average_rank():
         hand_str = suit_group_notation(hand, grouped=False)
         if hand_str in hands_gigaset:
             continue
-        nb_sims += 1
-        ranks = []
-        for i in range(1000):
-            d2 = Deck()
-            for c in hand:
-                d2.remove_card(c)
-            d2.fisher_yates_shuffle_improved()
-            s = Simulation(d2)
-            rank, _ = s.eval(hand)
-            ranks.append(rank)
-        nb_beat = len([r for r in ranks if r < 2860])
         hands_gigaset.add(hand_str)
-        rankings[nb_beat].append(hand_str)
+
+    iter_dict = elo_tourney.tourney
+    for i in range(10000):
+        for h1 in hands_gigaset:
+            league = sorted(hands_gigaset - {h1}, key=lambda h: abs(iter_dict[h1] - iter_dict[h]))[:100]
+            wins = 0
+            plays = 0
+            for h2 in league:
+                d2 = Deck()
+                c1, c2 = cards_from_suit_group(h1), cards_from_suit_group(h2)
+                try:
+                    for c in c1 + c2:
+                        d2.remove_card(c)
+                except ValueError:
+                    continue
+                plays += 1
+                d2.fisher_yates_shuffle_improved()
+                s = Simulation(d2)
+                rank_h1, _index = s.eval(c1)
+                rank_h2, _index = s.eval(c2)
+
+                if rank_h1 < rank_h2:
+                    elo_difference = iter_dict[h1] - iter_dict[h2]
+                    if elo_difference > 0:
+                        pgain = 0.5 ** (1 + elo_difference / 400)
+                    else:
+                        pgain = 1 - 0.5 ** (1 - elo_difference / 400)
+                    adjust = 0.05 * (1 - pgain)
+                    iter_dict[h1] += adjust
+                    iter_dict[h2] -= adjust
+                    wins += 1
+                elif rank_h2 < rank_h1:
+                    elo_difference = iter_dict[h2] - iter_dict[h1]
+                    if elo_difference > 0:
+                        pgain = 0.5 ** (1 + elo_difference / 400)
+                    else:
+                        pgain = 1 - 0.5 ** (1 - elo_difference / 400)
+                    adjust = 0.05 * (1 - pgain)
+                    iter_dict[h2] += adjust
+                    iter_dict[h1] -= adjust
+            if wins / plays > 0.6:
+                adjust = (wins / plays - 0.5) * 0.5
+                iter_dict[h1] += 100 * adjust
+                for h2 in league:
+                    iter_dict[h2] -= adjust
+            elif wins / plays < 0.4:
+                adjust = ((plays - wins) / plays - 0.5) * 0.5
+                iter_dict[h1] -= 100 * adjust
+                for h2 in league:
+                    iter_dict[h2] += adjust
+        import pprint
+        pprint.pprint((iter_dict))
+
 
     # hand_strs = list(ranks.keys())
     # cluster_nodes = cluster(8, plots, max_per_cluster=nb_sims / 8)
@@ -384,9 +438,9 @@ def average_rank():
     import pprint
     pprint.pprint(rankings)
 
-# average_rank()
+average_rank()
 
 import rankings
 
 r = rankings.rankings
-for
+

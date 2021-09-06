@@ -637,9 +637,12 @@ class PokerTableWidget(QWidget):
 
 
 class Game(QObject):
-    def __init__(self, nickname, l_channel, w_channel, spectate_only, user_id, key):
+    die = pyqtSignal(str)
+
+    def __init__(self, nickname, l_channel, w_channel, spectate_only, user_id, key, game_id):
         super().__init__()
         self.nickname = nickname
+        self.game_id = game_id
         self.user_id = user_id
         self.started = False
         self.spectate_only = spectate_only
@@ -745,6 +748,7 @@ class Game(QObject):
     def done(self):
         self.listener.stop()
         self.poker_timer.done = True
+        self.die.emit(self.game_id)
 
 
 class ConnectBtnConnector:
@@ -762,7 +766,7 @@ class GamesWindow(QScrollArea):
 
     def __init__(self, player_id, server, token):
         super().__init__()
-        self.games = []
+        self.games = {}
         self.signals = []
         self.server = server
         self.token = token
@@ -771,7 +775,7 @@ class GamesWindow(QScrollArea):
         self.setLayout(self._layout)
 
     def query_games(self):
-        self.games = []
+        self.games = {}
         self.signals = []
         for i in reversed(range(self._layout.count())):
             self._layout.itemAt(i).widget().setParent(None)
@@ -788,7 +792,7 @@ class GamesWindow(QScrollArea):
             self._layout.addWidget(label, i, 1)
             self._layout.addWidget(player_count, i, 2)
             self._layout.addWidget(join, i, 3)
-            self.games.append(queue)
+            self.games[queue] = i
         next_to_add = len(self.games)
         for i, (game, players) in enumerate(resp.json()['games'].items(), start=next_to_add):
             player_count = QLabel(str(len(players)))
@@ -800,7 +804,7 @@ class GamesWindow(QScrollArea):
             self._layout.addWidget(label, i, 1)
             self._layout.addWidget(player_count, i, 2)
             self._layout.addWidget(join, i, 3)
-            self.games.append(game)
+            self.games[game] = i
 
 class MainWindow(QMainWindow):
 
@@ -872,7 +876,6 @@ class MainWindow(QMainWindow):
             if observe_only:
                 resp = requests.get(f'https://{self.connect_window.top_window.fqdn.text()}/spectate/{game_id}',
                                     headers={'Authorization': self.token})
-                print(resp.text)
                 w_channel = None
             else:
                 w_connection = pika.BlockingConnection(
@@ -886,16 +889,22 @@ class MainWindow(QMainWindow):
                                                                              str(game_id),
                                                                              credentials=auth))
             l_channel = l_connection.channel()
-            self.games[game_id] = Game(nickname, l_channel, w_channel, observe_only, self.user_id, self.key)
-            self.games[game_id].start()
+            if game_id not in self.games:
+                self.games[game_id] = Game(nickname, l_channel, w_channel, observe_only, self.user_id, self.key, game_id)
+                self.games[game_id].die.connect(self.game_end)
+                self.games[game_id].start()
+                index = self.games_listing.games[game_id]
+                self.games_listing.layout().itemAtPosition(index, 3).widget().hide()
         except Exception as e:
             print(e)
 
-    def guest_connect(self):
-        pass  # TODO
-
-    def host_connect(self):
-        pass  # TODO
+    def game_end(self, game_id):
+        if game_id in self.games:
+            del self.games[game_id]
+        self.games_listing.query_games()
+        index = self.games_listing.games.get(game_id, None)
+        if index is not None:
+            self.games_listing.layout().itemAtPosition(index, 3).widget().show()
 
 
 def main():
