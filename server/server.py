@@ -482,9 +482,11 @@ class Game:
 
     def run(self):
         nb_hands = 0
-        now = datetime.datetime.utcnow()
         start_time = datetime.datetime.utcfromtimestamp(self.game_config.get('start_time', 0))
-        time.sleep(max((start_time - now).total_seconds(), 0))
+        now = datetime.datetime.utcnow()
+        while now < start_time:
+            time.sleep(2)
+            now = datetime.datetime.utcnow()
         self.game_start_send(self.credentials)
         all_connect_timeout = self.game_config['all_connect_timeout']
         while [p for p in self.players if p.disconnected]:
