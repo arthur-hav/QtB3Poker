@@ -483,7 +483,7 @@ class Game:
     def run(self):
         nb_hands = 0
         self.game_start_send(self.credentials)
-        all_connect_timeout = 600
+        all_connect_timeout = self.game_config['all_connect_timeout']
         while [p for p in self.players if p.disconnected]:
             time.sleep(2)
             all_connect_timeout -= 2
