@@ -56,14 +56,25 @@ class Deck:
 
 
 class Player:
-    def __init__(self):
+    def __init__(self, game, nick, queue_id, key, chips):
+        super().__init__()
         self.hand = None
         self.amount_bet = 0
         self.street_amount_bet = 0
         self.is_folded = False
         self.acted_street = False
-        self.chips = 0
-        self.key = None
+        self.chips = chips
+        if key:
+            self.key = Fernet(key)
+            self.disconnected = False
+        else:
+            self.key = None
+            self.disconnected = True
+        self.game = game
+        self.nick = nick
+        self.queue_id = queue_id
+        self.disconnected = True
+        self.action_queue = queue.Queue()
 
     def deal(self, deck):
         self.hand = [deck.pop(), deck.pop(), deck.pop()]
@@ -79,21 +90,6 @@ class Player:
         self.amount_bet += amount_bb
         self.street_amount_bet += amount_bb
         self.chips -= amount_bb
-
-    def act(self, gamehand):
-        if gamehand.max_amount_bet == self.amount_bet:
-            return
-        self.amount_bet = gamehand.max_amount_bet
-
-
-class Human(Player):
-    def __init__(self, game, nick, queue_id):
-        super().__init__()
-        self.game = game
-        self.nick = nick
-        self.queue_id = queue_id
-        self.disconnected = True
-        self.action_queue = queue.Queue()
 
     def act(self, gamehand):
         if self.disconnected:
@@ -396,7 +392,14 @@ class GameHand:
 
 class Game:
     def __init__(self, players, code, credentials, game_config):
-        self.players = [Human(self, p['login'], str(p['_id'])) for p in players]
+        r = redis.Redis()
+        self.credentials = credentials
+        self.players = [Player(self,
+                               p['login'],
+                               str(p['_id']),
+                               r.get(f'session.{p.queue_id}.key'),
+                               int(game_config['start_chips']))
+                        for p in players]
         self.connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, code,
                                                                             credentials=credentials))
         self.game_config = game_config
@@ -416,20 +419,13 @@ class Game:
         self.channel.queue_bind(exchange='poker_exchange',
                                 queue='public',
                                 routing_key='public')
-        r = redis.Redis()
         for p in self.players:
-            p.key = r.get(f'session.{p.queue_id}.key')
-            if p.key:
-                p.key = Fernet(p.key)
-                p.disconnected = False
-            p.chips = int(game_config['start_chips'])
             self.channel.queue_declare(f'public.{p.queue_id}')
             self.channel.queue_bind(exchange='poker_exchange',
                                     queue=f'public.{p.queue_id}',
                                     routing_key='public')
             rabbit_consumer = threading.Thread(target=p.read_queue, args=(code, credentials,))
             rabbit_consumer.start()
-        self.game_start_send(credentials)
 
     def broadcast(self, msg):
         self.last_msg_public = msg
@@ -486,7 +482,13 @@ class Game:
 
     def run(self):
         nb_hands = 0
-
+        self.game_start_send(self.credentials)
+        all_connect_timeout = 600
+        while [p for p in self.players if p.disconnected]:
+            time.sleep(2)
+            all_connect_timeout -= 2
+            if all_connect_timeout <= 0:
+                return
         while len(self.players) > 1:
             nb_hands += 1
             deck = Deck()
