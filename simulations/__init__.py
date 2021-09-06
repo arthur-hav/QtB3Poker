@@ -364,49 +364,61 @@ def average_rank():
     iter_dict = elo_tourney.tourney
     for i in range(10000):
         for h1 in hands_gigaset:
-            league = sorted(hands_gigaset - {h1}, key=lambda h: abs(iter_dict[h1] - iter_dict[h]))[:100]
+            league = sorted(hands_gigaset - {h1}, key=lambda h: abs(iter_dict[h1] - iter_dict[h]))[:200]
+            league_elo = sum(iter_dict[h] for h in league) / len(league)
+            league_diff = iter_dict[h1] - league_elo
             wins = 0
             plays = 0
             for h2 in league:
-                d2 = Deck()
-                c1, c2 = cards_from_suit_group(h1), cards_from_suit_group(h2)
-                try:
-                    for c in c1 + c2:
-                        d2.remove_card(c)
-                except ValueError:
-                    continue
-                plays += 1
-                d2.fisher_yates_shuffle_improved()
-                s = Simulation(d2)
-                rank_h1, _index = s.eval(c1)
-                rank_h2, _index = s.eval(c2)
+                wins_hand = 0
+                plays_hand = 0
+                for j in range(5):
+                    d2 = Deck()
+                    c1, c2 = cards_from_suit_group(h1), cards_from_suit_group(h2)
+                    try:
+                        for c in c1 + c2:
+                            d2.remove_card(c)
+                    except ValueError:
+                        continue
+                    plays += 1
+                    plays_hand += 1
+                    d2.fisher_yates_shuffle_improved()
+                    s = Simulation(d2)
+                    rank_h1, _index = s.eval(c1)
+                    rank_h2, _index = s.eval(c2)
+                    if rank_h1 < rank_h2:
+                        wins_hand += 1
+                        wins += 1
 
-                if rank_h1 < rank_h2:
+                if plays_hand and wins_hand / plays_hand > 0.5:
                     elo_difference = iter_dict[h1] - iter_dict[h2]
                     if elo_difference > 0:
                         pgain = 0.5 ** (1 + elo_difference / 400)
                     else:
                         pgain = 1 - 0.5 ** (1 - elo_difference / 400)
-                    adjust = 0.05 * (1 - pgain)
+                    adjust = 0.1 * (1 - pgain)
                     iter_dict[h1] += adjust
                     iter_dict[h2] -= adjust
-                    wins += 1
-                elif rank_h2 < rank_h1:
+                elif plays_hand:
                     elo_difference = iter_dict[h2] - iter_dict[h1]
                     if elo_difference > 0:
                         pgain = 0.5 ** (1 + elo_difference / 400)
                     else:
                         pgain = 1 - 0.5 ** (1 - elo_difference / 400)
-                    adjust = 0.05 * (1 - pgain)
+                    adjust = 0.1 * (1 - pgain)
                     iter_dict[h2] += adjust
                     iter_dict[h1] -= adjust
-            if wins / plays > 0.6:
-                adjust = (wins / plays - 0.5) * 0.5
+            if league_diff > 0:
+                expected_wr = 0.5 ** (1 + league_diff / 400)
+            else:
+                expected_wr = 1 - 0.5 ** (1 - league_diff / 400)
+            if wins / plays > 1.2 * expected_wr:
+                adjust = (wins / plays - expected_wr) * 0.4
                 iter_dict[h1] += 100 * adjust
                 for h2 in league:
                     iter_dict[h2] -= adjust
-            elif wins / plays < 0.4:
-                adjust = ((plays - wins) / plays - 0.5) * 0.5
+            elif wins / plays < 0.8 * expected_wr:
+                adjust = ((plays - wins) / plays - expected_wr) * 0.4
                 iter_dict[h1] -= 100 * adjust
                 for h2 in league:
                     iter_dict[h2] += adjust
