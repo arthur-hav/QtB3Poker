@@ -41,7 +41,7 @@ def admin_required(f):
         db = get_db()
         admin_user = db.usersf.find_one({'_id': ObjectId(payload['sub'])})
         if not admin_user or 'admin' not in admin_user:
-            return {'status': 'fail', 'reason': 'Require privileged user'}
+            return {'status': 'fail', 'reason': 'Require privileged user', 'test': payload['sub']}
         return f(payload['sub'], *args, **kwargs)
 
     return decorated_function
