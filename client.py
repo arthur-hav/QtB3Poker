@@ -12,6 +12,7 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 import json
 import base64
+import traceback
 
 sentry_sdk.init("https://bcdfdee5d8864d408aae8249eff6edc5@o968644.ingest.sentry.io/5919963")
 
@@ -674,6 +675,7 @@ class Game(QObject):
             self.poker_table.bet_actions.fold.pressed.connect(self.fold_btn)
             self.poker_table.bet_actions.bet.pressed.connect(self.bet_btn)
             self.poker_table.reconnect.pressed.connect(self.reconnect)
+        self.poker_table.show()
 
     def create_game(self):
         # TODO
@@ -718,7 +720,6 @@ class Game(QObject):
 
     def on_recv(self, gamestate):
         if not self.started:
-            self.poker_table.show()
             self.poker_table.startup_table([p['name'] for p in gamestate.get('players')])
             self.poker_timer_thread.start()
             self.started = True
@@ -901,12 +902,12 @@ class MainWindow(QMainWindow):
                 w_connection = pika.BlockingConnection(
                     pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
                                               5672,
-                                              str(game_id),
+                                              game_id,
                                               credentials=auth))
                 w_channel = w_connection.channel()
             l_connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
                                                                              5672,
-                                                                             str(game_id),
+                                                                             game_id,
                                                                              credentials=auth))
             if game_id not in self.games:
                 self.games[game_id] = Game(nickname, l_connection, w_channel, observe_only, self.user_id, self.key, game_id)
@@ -917,8 +918,6 @@ class MainWindow(QMainWindow):
                 self.games_listing.layout().itemAtPosition(index, 4).widget().hide()
         except Exception as e:
             print(e)
-        finally:
-            self.launch_mutex.unlock()
 
     def game_end(self, game_id):
         if game_id in self.games:

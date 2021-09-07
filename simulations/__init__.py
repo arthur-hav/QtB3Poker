@@ -2,13 +2,12 @@ from deuces import Card, evaluator
 import itertools
 from math import floor
 import random
-import matplotlib.pyplot as plt
-from collections import defaultdict
+from collections import defaultdict, Counter
 import networkx as nx
 import Levenshtein as lev
 import re
 import elo_tourney
-import bisect
+import hands_rank_sim
 
 ev = evaluator.Evaluator()
 
@@ -84,6 +83,18 @@ def suit_group_notation(hand, grouped=True):
 
     return pair_prefix + ''.join(
         ranks[Card.get_rank_int(c)] for c in sorted(sorted_cards, key=lambda c: -Card.get_rank_int(c)))
+
+
+def compare_rank_counters(c1, c2, num_total):
+    sum_ranks = c1 + c2
+    nb_below_c2 = 0
+    total_played = num_total ** 2
+    total_won_c1 = 0
+    for k in sorted(sum_ranks.keys()):
+        nb_below_c2 += c2[k] / 2
+        total_won_c1 += (num_total - nb_below_c2) * c1[k]
+        nb_below_c2 += c2[k] / 2
+    return total_won_c1 / total_played
 
 
 def cards_from_suit_group(suit_group_hand):
@@ -339,20 +350,10 @@ class HandGroup:
                     yield (Card.new(rank1 + suits[0]), Card.new(rank2 + suits[1]), Card.new(rank3 + suits[2]))
 
 def average_rank():
-    first_group = [HandGroup.from_str(g)
-                   for g in ['<[AK]s[JT][TB]>', '<pA[ML]>', '<pAs[BL]>',
-                             '<pBAs>', '<pB[AM]>', '<pB[JL]>', '<pB[QM]s>',
-                             '<pBs[BL]>', '<pJ[BL]>', '<pJ[QM]s>',
-                             '<pK[AM]>', '<pK[JL]>', '<pKs[QB]>', '<pLM>',
-                             '<pL[AJ]s>', '<pL[KQ]s>', '<pL[ML]s>',
-                             '<pM[AK]s>', '<pM[AM]>', '<pM[JL]s>',
-                             '<pM[QM]s>', '<pQK>', '<pQs[BL]>', '<pT[AM]>', '<pT[QL]>', '<pTs[BL]>']]
-
     hands_gigaset = set()
-    rankings = defaultdict(list)
-    nb_sims = 0
-    #for group in first_group:
-
+    studied_group = ['p(A9)A', 'p(AK)A',
+    'p(A4)A', 'p(A6)A', 'p(A8)A', 'p(AQ)A', 'p(A3)A', 'p(A2)A', 'p(A5)A', 'pAAT', 'p(AJ)A', 'p(A7)A',
+    'p(AT)A']
     d = Deck()
 
     for hand in itertools.combinations(d.cards, 3):
@@ -361,69 +362,56 @@ def average_rank():
             continue
         hands_gigaset.add(hand_str)
 
-    iter_dict = elo_tourney.tourney
+    iter_dict = dict(elo_tourney.tourney)
+    sims_gigadict = hands_rank_sim.sims_gigadict
+    num_total = 0
+    for k, lst in sims_gigadict.items():
+        sims_gigadict[k] = Counter(lst)
+        num_total = sum(sims_gigadict[k].values())
+    # for k in range(100):
+    #     for h1 in hands_gigaset:
+    #         for j in range(100):
+    #             c1 = cards_from_suit_group(h1)
+    #             d2 = Deck()
+    #             for card in c1:
+    #                 d2.remove_card(card)
+    #             d2.fisher_yates_shuffle_improved()
+    #             s = Simulation(d2)
+    #             rank_h1, _index = s.eval(c1)
+    #             sims_gigadict[h1][rank_h1] += 1
+    #     with open('hands_rank_sim.py', 'w') as f:
+    #         f.write(str({k: dict(v) for k, v in sims_gigadict.items()}))
     for i in range(10000):
         for h1 in hands_gigaset:
-            league = sorted(hands_gigaset - {h1}, key=lambda h: abs(iter_dict[h1] - iter_dict[h]))[:200]
-            league_elo = sum(iter_dict[h] for h in league) / len(league)
-            league_diff = iter_dict[h1] - league_elo
-            wins = 0
-            plays = 0
-            for h2 in league:
-                wins_hand = 0
-                plays_hand = 0
-                for j in range(5):
-                    d2 = Deck()
-                    c1, c2 = cards_from_suit_group(h1), cards_from_suit_group(h2)
-                    try:
-                        for c in c1 + c2:
-                            d2.remove_card(c)
-                    except ValueError:
-                        continue
-                    plays += 1
-                    plays_hand += 1
-                    d2.fisher_yates_shuffle_improved()
-                    s = Simulation(d2)
-                    rank_h1, _index = s.eval(c1)
-                    rank_h2, _index = s.eval(c2)
-                    if rank_h1 < rank_h2:
-                        wins_hand += 1
-                        wins += 1
-
-                if plays_hand and wins_hand / plays_hand > 0.5:
-                    elo_difference = iter_dict[h1] - iter_dict[h2]
-                    if elo_difference > 0:
-                        pgain = 0.5 ** (1 + elo_difference / 400)
-                    else:
-                        pgain = 1 - 0.5 ** (1 - elo_difference / 400)
-                    adjust = 0.1 * (1 - pgain)
-                    iter_dict[h1] += adjust
-                    iter_dict[h2] -= adjust
-                elif plays_hand:
-                    elo_difference = iter_dict[h2] - iter_dict[h1]
-                    if elo_difference > 0:
-                        pgain = 0.5 ** (1 + elo_difference / 400)
-                    else:
-                        pgain = 1 - 0.5 ** (1 - elo_difference / 400)
-                    adjust = 0.1 * (1 - pgain)
-                    iter_dict[h2] += adjust
-                    iter_dict[h1] -= adjust
-            if league_diff > 0:
-                expected_wr = 0.5 ** (1 + league_diff / 400)
+            total_adjust = 0
+            cards_h1 = cards_from_suit_group(h1)
+            deck = Deck()
+            for c in cards_h1:
+                deck.remove_card(c)
+            deck.fisher_yates_shuffle_improved()
+            h2 = suit_group_notation([deck.pop(), deck.pop(), deck.pop()], grouped=False)
+            ratio = compare_rank_counters(sims_gigadict[h1], sims_gigadict[h2], num_total)
+            elo_difference = iter_dict[h1] - iter_dict[h2]
+            if elo_difference > 0:
+                expected_wr = 1 - 0.5 ** (1 + elo_difference / 800)
             else:
-                expected_wr = 1 - 0.5 ** (1 - league_diff / 400)
-            if wins / plays > 1.2 * expected_wr:
-                adjust = (wins / plays - expected_wr) * 0.4
-                iter_dict[h1] += 100 * adjust
-                for h2 in league:
-                    iter_dict[h2] -= adjust
-            elif wins / plays < 0.8 * expected_wr:
-                adjust = ((plays - wins) / plays - expected_wr) * 0.4
-                iter_dict[h1] -= 100 * adjust
-                for h2 in league:
-                    iter_dict[h2] += adjust
+                expected_wr = 0.5 ** (1 - elo_difference / 800)
+            if ratio > expected_wr:
+                adjust = 5 * (ratio - expected_wr)
+                if abs(elo_difference) < 100:
+                    adjust *= 1.5
+                iter_dict[h1] += adjust
+                iter_dict[h2] -= adjust
+                total_adjust += adjust
+            else:
+                adjust = 5 * (expected_wr - ratio)
+                if abs(elo_difference) < 100:
+                    adjust *= 1.5
+                iter_dict[h2] += adjust
+                iter_dict[h1] -= adjust
+                total_adjust -= adjust
         import pprint
-        pprint.pprint((iter_dict))
+        pprint.pprint(sorted([(k, iter_dict[k]) for k in hands_gigaset], key=lambda it: it[1]))
 
 
     # hand_strs = list(ranks.keys())
@@ -447,11 +435,7 @@ def average_rank():
         # sum_avg = int(sum(avg_cluster) / 1000.0)
         # print([hand_strs[n] for n in node_list])
         # hand_group_clusters[i] = f'{sum_avg}' + ', '.join(sorted(set(hand_strs[n] for n in node_list)))
-    import pprint
-    pprint.pprint(rankings)
 
-# average_rank()
+if __name__ == '__main__':
+    average_rank()
 
-r = elo_tourney.tourney
-import pprint
-pprint.pprint(sorted(r.keys(), key=lambda k: r[k]), width=100, compact=False)
