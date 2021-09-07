@@ -795,7 +795,7 @@ class GamesWindow(QScrollArea):
             join.pressed.connect(self.signals[-1])
             self._layout.addWidget(label, i, 1)
             self._layout.addWidget(player_count, i, 2)
-            self._layout.addWidget(QLabel('registering'), 3)
+            self._layout.addWidget(QLabel('registering'), i, 3)
             self._layout.addWidget(join, i, 4)
             self.games[queue] = i
         next_to_add = len(self.games)
@@ -809,7 +809,7 @@ class GamesWindow(QScrollArea):
                 join.pressed.connect(self.signals[-1])
             self._layout.addWidget(label, i, 1)
             self._layout.addWidget(player_count, i, 2)
-            self._layout.addWidget(QLabel(data['status']), 3)
+            self._layout.addWidget(QLabel(data['status']), i, 3)
             self._layout.addWidget(join, i, 4)
             self.games[game] = i
 

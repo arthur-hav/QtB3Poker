@@ -186,7 +186,7 @@ def list_games(user_id):
         r.delete(*[f'games.{key}.players' for key in to_del])
     for game in games:
         game_data[game] = {'players': [p.decode('utf-8') for p in r.sscan_iter(f'games.{game}.players')],
-                           'status': r.get(f'games.{game}.status')}
+                           'status': r.get(f'games.{game}.status').decode('utf-8')}
     return {'status': 'success', 'games': game_data, 'queues': queue_data}
 
 
