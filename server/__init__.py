@@ -185,7 +185,8 @@ def list_games(user_id):
         r.hdel('games.start', *to_del)
         r.delete(*[f'games.{key}.players' for key in to_del])
     for game in games:
-        game_data[game] = [p.decode('utf-8') for p in r.sscan_iter(f'games.{game}.players')]
+        game_data[game] = {'players': [p.decode('utf-8') for p in r.sscan_iter(f'games.{game}.players')],
+                           'status': r.get(f'games.{game}.status')}
     return {'status': 'success', 'games': game_data, 'queues': queue_data}
 
 
@@ -254,6 +255,7 @@ def create_queue(user_id, queue_key):
 def transfer_currency(user_id, currency):
     ledger = json.loads(request.form['data'])
     updated_players = []
+    db = get_db()
     for player, value in ledger.items():
         player = db.users.find_one({'login': player})
         if player.get(currency, 0) + value < 0:
@@ -270,3 +272,4 @@ def get_balance(user_id, currency):
     user = db.users.find_one({'_id': ObjectId(user_id)})
     if user:
         return {'status': 'success', 'balance': user.get(currency, 0)}
+    return {'status': 'fail', 'reason': 'User not found'}

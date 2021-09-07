@@ -393,6 +393,7 @@ class GameHand:
 class Game:
     def __init__(self, players, code, credentials, game_config):
         r = redis.Redis()
+        r.set(f'games.{code}.status', 'scheduled')
         self.credentials = credentials
         self.players = [Player(self,
                                p['login'],
@@ -487,6 +488,8 @@ class Game:
         while now < start_time:
             time.sleep(2)
             now = datetime.datetime.utcnow()
+        r = redis.Redis()
+        r.set(f'games.{self.code}.status', 'sitting in')
         self.game_start_send(self.credentials)
         all_connect_timeout = self.game_config['all_connect_timeout']
         while [p for p in self.players if p.disconnected]:
@@ -494,6 +497,7 @@ class Game:
             all_connect_timeout -= 2
             if all_connect_timeout <= 0:
                 return
+        r.set(f'games.{self.code}.status', 'running')
         while len(self.players) > 1:
             nb_hands += 1
             deck = Deck()

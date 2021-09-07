@@ -5,7 +5,6 @@ from PyQt5.QtMultimedia import QSound
 import sentry_sdk
 from tutorial import Tutorial
 import time
-import random
 import yaml
 import pika
 import requests
@@ -773,6 +772,7 @@ class GamesWindow(QScrollArea):
         self.player_id = player_id
         self._layout = QGridLayout()
         self.setLayout(self._layout)
+        self._layout.setAlignment(Qt.AlignTop)
 
     def query_games(self):
         self.games = {}
@@ -782,7 +782,11 @@ class GamesWindow(QScrollArea):
         resp = requests.get(f'https://{self.server}/list_games', headers={'Authorization': self.token})
         if not resp.json() or not resp.json()['status'] == 'success':
             return
-        for i, (queue, data) in enumerate(resp.json()['queues'].items()):
+        self._layout.addWidget(QLabel('Name'), 0, 1)
+        self._layout.addWidget(QLabel('Players'), 0, 2)
+        self._layout.addWidget(QLabel('Status'), 0, 3)
+        self._layout.addWidget(QLabel('Action'), 0, 4)
+        for i, (queue, data) in enumerate(resp.json()['queues'].items(), start=1):
             player_count = QLabel(f'{len(data["players"])} / {data["seats"]}')
             label = QLabel(queue)
             join = QPushButton()
@@ -791,19 +795,22 @@ class GamesWindow(QScrollArea):
             join.pressed.connect(self.signals[-1])
             self._layout.addWidget(label, i, 1)
             self._layout.addWidget(player_count, i, 2)
-            self._layout.addWidget(join, i, 3)
+            self._layout.addWidget(QLabel('registering'), 3)
+            self._layout.addWidget(join, i, 4)
             self.games[queue] = i
         next_to_add = len(self.games)
-        for i, (game, players) in enumerate(resp.json()['games'].items(), start=next_to_add):
-            player_count = QLabel(str(len(players)))
+        for i, (game, data) in enumerate(resp.json()['games'].items(), start=next_to_add):
+            player_count = QLabel(str(len(data['players'])))
             label = QLabel(game)
-            join = QPushButton()
-            join.setText("Observe" if self.player_id not in players else "Take seat")
-            self.signals.append(ConnectBtnConnector(self.connect_signal.emit, game, self.player_id not in players))
-            join.pressed.connect(self.signals[-1])
+            if data['status'] == 'running':
+                join = QPushButton()
+                join.setText("Observe" if self.player_id not in data['players'] else "Take seat")
+                self.signals.append(ConnectBtnConnector(self.connect_signal.emit, game, self.player_id not in players))
+                join.pressed.connect(self.signals[-1])
             self._layout.addWidget(label, i, 1)
             self._layout.addWidget(player_count, i, 2)
-            self._layout.addWidget(join, i, 3)
+            self._layout.addWidget(QLabel(data['status']), 3)
+            self._layout.addWidget(join, i, 4)
             self.games[game] = i
 
 class MainWindow(QMainWindow):
