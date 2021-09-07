@@ -7,6 +7,7 @@ from tutorial import Tutorial
 import time
 import yaml
 import pika
+import pika.exceptions
 import requests
 from cryptography.fernet import Fernet, InvalidToken
 import json
@@ -76,16 +77,20 @@ class GameStartListener(QObject):
             self.game_start.emit(body['game'])
 
     def stop(self):
-        self.channel.stop_consuming()
+        if self.channel.is_open:
+            try:
+                self.channel.stop_consuming()
+            except pika.exceptions.StreamLostError:
+                pass
 
 
 class Listener(QObject):
     gamestate = pyqtSignal(dict)
     private = pyqtSignal(dict)
 
-    def __init__(self, channel, player_id, key):
+    def __init__(self, connection, player_id, key):
         super().__init__()
-        self.channel = channel
+        self.channel = connection.channel()
         self.key = key
         self.player_id = player_id
 
@@ -110,7 +115,11 @@ class Listener(QObject):
             self.gamestate.emit(body)
 
     def stop(self):
-        self.channel.stop_consuming()
+        if self.channel.is_open:
+            try:
+                self.channel.stop_consuming()
+            except pika.exceptions.StreamLostError:
+                pass
 
 
 class Board(QWidget):
@@ -638,7 +647,7 @@ class PokerTableWidget(QWidget):
 class Game(QObject):
     die = pyqtSignal(str)
 
-    def __init__(self, nickname, l_channel, w_channel, spectate_only, user_id, key, game_id):
+    def __init__(self, nickname, l_connection, w_channel, spectate_only, user_id, key, game_id):
         super().__init__()
         self.nickname = nickname
         self.game_id = game_id
@@ -648,7 +657,7 @@ class Game(QObject):
         self.poker_table = PokerTableWidget(nickname, spectate_only)
         self.channel = w_channel
         self.listener_thread = QThread()
-        self.listener = Listener(l_channel, user_id, key)
+        self.listener = Listener(l_connection, user_id, key)
         self.listener.moveToThread(self.listener_thread)
         self.listener.gamestate.connect(self.on_recv)
         self.listener_thread.started.connect(self.listener.run)
@@ -802,9 +811,10 @@ class GamesWindow(QScrollArea):
         for i, (game, data) in enumerate(resp.json()['games'].items(), start=next_to_add):
             player_count = QLabel(str(len(data['players'])))
             label = QLabel(game)
+            status = QLabel(data['status'])
             self._layout.addWidget(label, i, 1)
             self._layout.addWidget(player_count, i, 2)
-            self._layout.addWidget(QLabel(data['status']), i, 3)
+            self._layout.addWidget(status, i, 3)
             if data['status'] == 'running':
                 join = QPushButton()
                 join.setText("Observe" if self.player_id not in data['players'] else "Take seat")
@@ -812,6 +822,7 @@ class GamesWindow(QScrollArea):
                 join.pressed.connect(self.signals[-1])
                 self._layout.addWidget(join, i, 4)
             self.games[game] = i
+
 
 class MainWindow(QMainWindow):
 
@@ -832,6 +843,7 @@ class MainWindow(QMainWindow):
         self.password = None
         self.game_listener_thread = QThread()
         self.games = {}
+        self.launch_mutex = QMutex()
 
     def log_success_register(self):
         self.connect_window.query_logs.push_message("Successfully registered")
@@ -854,7 +866,6 @@ class MainWindow(QMainWindow):
         self.games_listing.connect_signal.connect(self.on_recv)
         self.games_listing.queue_signal.connect(self.queue)
         self.games_listing.query_games()
-
         self.connect_window.layout().insertWidget(2, self.games_listing)
         self.games_listing.show()
         auth = pika.PlainCredentials(user_id, password)
@@ -877,6 +888,8 @@ class MainWindow(QMainWindow):
                      headers={'Authorization': self.token})
 
     def on_recv(self, game_id, observe_only=False):
+        self.launch_mutex.lock()
+        game_id = str(game_id)
         auth = pika.PlainCredentials(self.user_id, self.password)
         nickname = self.connect_window.top_window.nickname.text()
         try:
@@ -895,15 +908,17 @@ class MainWindow(QMainWindow):
                                                                              5672,
                                                                              str(game_id),
                                                                              credentials=auth))
-            l_channel = l_connection.channel()
             if game_id not in self.games:
-                self.games[game_id] = Game(nickname, l_channel, w_channel, observe_only, self.user_id, self.key, game_id)
+                self.games[game_id] = Game(nickname, l_connection, w_channel, observe_only, self.user_id, self.key, game_id)
                 self.games[game_id].die.connect(self.game_end)
                 self.games[game_id].start()
+                self.games_listing.query_games()
                 index = self.games_listing.games[game_id]
-                self.games_listing.layout().itemAtPosition(index, 3).widget().hide()
+                self.games_listing.layout().itemAtPosition(index, 4).widget().hide()
         except Exception as e:
             print(e)
+        finally:
+            self.launch_mutex.unlock()
 
     def game_end(self, game_id):
         if game_id in self.games:
@@ -911,7 +926,7 @@ class MainWindow(QMainWindow):
         self.games_listing.query_games()
         index = self.games_listing.games.get(game_id, None)
         if index is not None:
-            self.games_listing.layout().itemAtPosition(index, 3).widget().show()
+            self.games_listing.layout().itemAtPosition(index, 4).widget().show()
 
 
 def main():
