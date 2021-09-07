@@ -798,19 +798,19 @@ class GamesWindow(QScrollArea):
             self._layout.addWidget(QLabel('registering'), i, 3)
             self._layout.addWidget(join, i, 4)
             self.games[queue] = i
-        next_to_add = len(self.games)
+        next_to_add = len(self.games) + 1
         for i, (game, data) in enumerate(resp.json()['games'].items(), start=next_to_add):
             player_count = QLabel(str(len(data['players'])))
             label = QLabel(game)
-            if data['status'] == 'running':
-                join = QPushButton()
-                join.setText("Observe" if self.player_id not in data['players'] else "Take seat")
-                self.signals.append(ConnectBtnConnector(self.connect_signal.emit, game, self.player_id not in players))
-                join.pressed.connect(self.signals[-1])
             self._layout.addWidget(label, i, 1)
             self._layout.addWidget(player_count, i, 2)
             self._layout.addWidget(QLabel(data['status']), i, 3)
-            self._layout.addWidget(join, i, 4)
+            if data['status'] == 'running':
+                join = QPushButton()
+                join.setText("Observe" if self.player_id not in data['players'] else "Take seat")
+                self.signals.append(ConnectBtnConnector(self.connect_signal.emit, game, self.player_id not in data['players']))
+                join.pressed.connect(self.signals[-1])
+                self._layout.addWidget(join, i, 4)
             self.games[game] = i
 
 class MainWindow(QMainWindow):

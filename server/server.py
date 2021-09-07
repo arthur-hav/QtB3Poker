@@ -413,7 +413,7 @@ class Game:
                                                              'date': self.start_time}).inserted_id
         self.last_msg_private = {}
         self.last_msg_public = None
-        self.blind_augment = self.start_time
+        self.blind_augment = None
         self.channel = self.connection.channel()
         self.channel.exchange_declare(exchange='poker_exchange', exchange_type='topic')
         self.channel.queue_declare('public', auto_delete=True)
@@ -487,6 +487,7 @@ class Game:
         now = datetime.datetime.utcnow()
         while now < start_time:
             time.sleep(2)
+            self.connection.process_data_events()
             now = datetime.datetime.utcnow()
         r = redis.Redis()
         r.set(f'games.{self.code}.status', 'sitting in')
@@ -494,10 +495,12 @@ class Game:
         all_connect_timeout = self.game_config['all_connect_timeout']
         while [p for p in self.players if p.disconnected]:
             time.sleep(2)
+            self.connection.process_data_events()
             all_connect_timeout -= 2
             if all_connect_timeout <= 0:
                 return
         r.set(f'games.{self.code}.status', 'running')
+        self.blind_augment = datetime.datetime.utcnow()
         while len(self.players) > 1:
             nb_hands += 1
             deck = Deck()
