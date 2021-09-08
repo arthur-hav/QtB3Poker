@@ -230,9 +230,8 @@ def queue(user_id, queue_key):
     if len(user_list) >= nb_seats:
         db = get_db()
         users = list(db.users.find({'_id': {'$in': [ObjectId(u.decode('utf-8')) for u in user_list]}}))
-        game_config = dict((k.decode('utf-8'), float(v.decode('utf-8')))
-                           for k, v in r.hscan_iter(f'queue.{queue_key}.config') if k != b'plugin') # TODO: proper config
-
+        game_config = dict((k.decode('utf-8'), float(v.decode('utf-8')) if k != b'plugin' else v.decode('utf-8'))
+                           for k, v in r.hscan_iter(f'queue.{queue_key}.config')) # TODO: proper config
         p = mp.Process(target=server.SeatingListener, args=(game_config, users))
         p.start()
         r.hset('games.start', p.pid, datetime.datetime.utcnow().timestamp())

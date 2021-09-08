@@ -619,4 +619,3 @@ class SeatingListener:
                 m = importlib.import_module('plugins.' + self.game_config['plugin'])
                 m.post_game_hook(self.code)
             requests.delete(f'http://localhost:15672/api/vhosts/{self.code}', auth=('admin', rabbitmq_admin_password))
-            raise game_config
