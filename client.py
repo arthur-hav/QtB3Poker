@@ -48,14 +48,18 @@ class EndWidget(QWidget):
 class PokerTimer(QObject):
     timer_sig = pyqtSignal()
 
-    def __init__(self):
+    def __init__(self, done_signal):
         super().__init__()
+        done_signal.connect(self.stop)
         self.done = False
 
     def run(self):
         while not self.done:
             self.timer_sig.emit()
             time.sleep(0.5)
+
+    def stop(self):
+        self.done = True
 
 
 class GameStartListener(QObject):
@@ -66,6 +70,7 @@ class GameStartListener(QObject):
         super().__init__()
         self.channel = channel
         self.player_id = player_id
+        self.channel.queue_purge(f'public.{self.player_id}')
 
     def run(self):
         self.channel.basic_consume(f'public.{self.player_id}', on_message_callback=self.callback, auto_ack=True)
@@ -74,15 +79,8 @@ class GameStartListener(QObject):
     def callback(self, ch, method, properties, body):
         self.queue_update.emit()
         body = json.loads(body.decode('utf-8'))
-        if 'game'in body and self.player_id in body['players']:
+        if 'game' in body and self.player_id in body['players']:
             self.game_start.emit(body['game'])
-
-    def stop(self):
-        if self.channel.is_open:
-            try:
-                self.channel.stop_consuming()
-            except pika.exceptions.StreamLostError:
-                pass
 
 
 class Listener(QObject):
@@ -91,13 +89,15 @@ class Listener(QObject):
 
     def __init__(self, connection, player_id, key):
         super().__init__()
+        self.connection = connection
         self.channel = connection.channel()
         self.key = key
         self.player_id = player_id
+        self.channel.queue_purge(f'public.{self.player_id}')
 
     def run(self):
-        self.channel.queue_purge(f'public.{self.player_id}')
-        self.channel.basic_consume(f'public.{self.player_id}', on_message_callback=self.callback, auto_ack=True)
+        self.channel.basic_consume(f'public.{self.player_id}', on_message_callback=self.callback, auto_ack=True,
+                                   consumer_tag=self.player_id)
         self.channel.start_consuming()
 
     def callback(self, ch, method, properties, body):
@@ -116,11 +116,7 @@ class Listener(QObject):
             self.gamestate.emit(body)
 
     def stop(self):
-        if self.channel.is_open:
-            try:
-                self.channel.stop_consuming()
-            except pika.exceptions.StreamLostError:
-                pass
+        self.channel.basic_cancel(self.player_id)
 
 
 class Board(QWidget):
@@ -498,13 +494,13 @@ class BetActions(QWidget):
 
 
 class PokerTableWidget(QWidget):
-    die = pyqtSignal()
 
-    def __init__(self, nickname, spectate_only):
+    def __init__(self, nickname, spectate_only, close_callback):
         super().__init__()
         self.bg = QLabel(parent=self)
         pixmap = QPixmap()
         pixmap.load('images/Background.png')
+        self.close_callback = close_callback
         self.bg.setPixmap(pixmap)
         self.setFixedSize(800, 600)
         self.board = Board()
@@ -531,9 +527,9 @@ class PokerTableWidget(QWidget):
         self.event_log.setParent(self)
         self.event_log.move(20, 500)
 
-    def closeEvent(self, *args, **kwargs):
-        self.die.emit()
-        super().closeEvent(*args, **kwargs)
+    def closeEvent(self, close_event):
+        self.close_callback()
+        return super().closeEvent(close_event)
 
     def setWinningHand(self, winning_hand):
         for player in self.players:
@@ -646,29 +642,29 @@ class PokerTableWidget(QWidget):
 
 
 class Game(QObject):
-    die = pyqtSignal(str)
+    die = pyqtSignal()
 
-    def __init__(self, nickname, l_connection, w_channel, spectate_only, user_id, key, game_id):
+    def __init__(self, nickname, l_connection, w_connection, spectate_only, user_id, key, close_callback):
         super().__init__()
         self.nickname = nickname
-        self.game_id = game_id
         self.user_id = user_id
+        self.close_callback = close_callback
         self.started = False
         self.spectate_only = spectate_only
-        self.poker_table = PokerTableWidget(nickname, spectate_only)
-        self.channel = w_channel
+        self.poker_table = PokerTableWidget(nickname, spectate_only, self.done)
+        self.connection = w_connection
+        self.channel = w_connection.channel()
         self.listener_thread = QThread()
         self.listener = Listener(l_connection, user_id, key)
         self.listener.moveToThread(self.listener_thread)
         self.listener.gamestate.connect(self.on_recv)
         self.listener_thread.started.connect(self.listener.run)
         self.timer_mutex = QMutex()
-        self.poker_timer = PokerTimer()
+        self.poker_timer = PokerTimer(self.die)
         self.poker_timer_thread = QThread()
         self.poker_timer.moveToThread(self.poker_timer_thread)
         self.poker_timer_thread.started.connect(self.poker_timer.run)
         self.poker_timer.timer_sig.connect(self.decrease_timer)
-        self.poker_table.die.connect(self.done)
         if not spectate_only:
             self.listener.private.connect(self.on_recv_private)
             self.poker_table.bet_actions.call.pressed.connect(self.call_btn)
@@ -686,9 +682,9 @@ class Game(QObject):
                          'number_seats': int(self.room_tab.number_seats.text())}
 
     def start(self):
+        self.listener_thread.start()
         if self.channel:
             self.reconnect()
-        self.listener_thread.start()
 
     def call_btn(self):
         self.channel.basic_publish(exchange='poker_exchange',
@@ -756,8 +752,11 @@ class Game(QObject):
 
     def done(self):
         self.listener.stop()
-        self.poker_timer.done = True
-        self.die.emit(self.game_id)
+        self.connection.close()
+        self.die.emit()
+        self.listener_thread.quit()
+        self.poker_timer_thread.quit()
+        self.close_callback()
 
 
 class ConnectBtnConnector:
@@ -853,10 +852,6 @@ class MainWindow(QMainWindow):
         self.t = Tutorial()
         self.t.show()
 
-    def _done(self):
-        self.setCentralWidget(self.connect_window)
-        self.adjustSize()
-
     def show_games(self, token, key, games, user_id, password):
         self.token = token
         self.user_id = user_id
@@ -894,30 +889,27 @@ class MainWindow(QMainWindow):
         auth = pika.PlainCredentials(self.user_id, self.password)
         nickname = self.connect_window.top_window.nickname.text()
         try:
+            if game_id in self.games:
+                return
             if observe_only:
                 resp = requests.get(f'https://{self.connect_window.top_window.fqdn.text()}/spectate/{game_id}',
                                     headers={'Authorization': self.token})
-                w_channel = None
+                w_connection = None
             else:
                 w_connection = pika.BlockingConnection(
                     pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
                                               5672,
                                               game_id,
                                               credentials=auth))
-                w_channel = w_connection.channel()
             l_connection = pika.BlockingConnection(pika.ConnectionParameters(self.connect_window.top_window.fqdn.text(),
                                                                              5672,
                                                                              game_id,
                                                                              credentials=auth))
-            if game_id not in self.games:
-                self.games[game_id] = Game(nickname, l_connection, w_channel, observe_only, self.user_id, self.key, game_id)
-                self.games[game_id].die.connect(self.game_end)
-                self.games[game_id].start()
-                self.games_listing.query_games()
-                index = self.games_listing.games[game_id]
-                self.games_listing.layout().itemAtPosition(index, 4).widget().hide()
-        except Exception as e:
-            print(e)
+
+            self.games[game_id] = Game(nickname, l_connection, w_connection, observe_only, self.user_id, self.key,
+                                       lambda: self.game_end(game_id))
+            self.games[game_id].start()
+            self.games_listing.query_games()
         finally:
             self.launch_mutex.unlock()
 
@@ -925,9 +917,6 @@ class MainWindow(QMainWindow):
         if game_id in self.games:
             del self.games[game_id]
         self.games_listing.query_games()
-        index = self.games_listing.games.get(game_id, None)
-        if index is not None:
-            self.games_listing.layout().itemAtPosition(index, 4).widget().show()
 
 
 def main():
