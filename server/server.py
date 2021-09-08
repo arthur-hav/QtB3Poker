@@ -393,7 +393,6 @@ class GameHand:
 class Game:
     def __init__(self, players, code, credentials, game_config):
         r = redis.Redis()
-        r.set(f'games.{code}.status', 'scheduled')
         self.credentials = credentials
         self.players = [Player(self,
                                p['login'],

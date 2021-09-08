@@ -159,6 +159,7 @@ def create_game(user_id):
     p.start()
     r.hset('games.start', p.pid, datetime.datetime.utcnow().timestamp())
     r.sadd(f'games.{p.pid}.players', *[str(u['_id']) for u in users])
+    r.set(f'games.{p.pid}.status', 'scheduled')
     return {'status': 'success', 'server_id': p.pid}
 
 
@@ -184,6 +185,7 @@ def list_games(user_id):
     if to_del:
         r.hdel('games.start', *to_del)
         r.delete(*[f'games.{key}.players' for key in to_del])
+        r.delete(*[f'games.{key}.status' for key in to_del])
     for game in games:
         game_data[game] = {'players': [p.decode('utf-8') for p in r.sscan_iter(f'games.{game}.players')],
                            'status': r.get(f'games.{game}.status').decode('utf-8')}
@@ -235,6 +237,7 @@ def queue(user_id, queue_key):
         r.hset('games.start', p.pid, datetime.datetime.utcnow().timestamp())
         r.sadd(f'games.{p.pid}.players', *user_list)
         r.delete(f'queue.{queue_key}.players')
+        r.set(f'games.{p.pid}.status', 'sitting in')
     return {'status': 'success'}
 
 
