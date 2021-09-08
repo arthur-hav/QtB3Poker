@@ -918,6 +918,8 @@ class MainWindow(QMainWindow):
                 self.games_listing.layout().itemAtPosition(index, 4).widget().hide()
         except Exception as e:
             print(e)
+        finally:
+            self.launch_mutex.unlock()
 
     def game_end(self, game_id):
         if game_id in self.games:
