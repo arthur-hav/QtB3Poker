@@ -493,7 +493,7 @@ class Game:
         r = redis.Redis()
         r.set(f'games.{self.code}.status', 'sitting in')
         self.game_start_send(self.credentials)
-        all_connect_timeout = self.game_config['all_connect_timeout']
+        all_connect_timeout = self.game_config.get('all_connect_timeout', 0)
         while [p for p in self.players if p.disconnected]:
             time.sleep(2)
             self.connection.process_data_events()
