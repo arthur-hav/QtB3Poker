@@ -180,6 +180,7 @@ class GameHand:
             self.hand_document['winnings'][player.queue_id] = 0
 
     def _deal(self):
+        self.send_state(None)
         self.last_action = None
         for p in list(self.players):
             if not p.chips and not p.amount_bet:
