@@ -208,8 +208,8 @@ class GameHand:
             p.deal(self.deck)
             self.hand_document['hands'][p.queue_id] = ''.join(Card.int_to_str(c) for c in p.hand)
 
-        players_actable = [p for p in self.players if p.chips and not p.is_folded]
-        if len(players_actable) < 2:
+        players_actable = [p for p in self.players if p.chips and p.amount_bet < self.max_amount_bet]
+        if not players_actable:
             if len(self.players) == 2:
                 self.players.reverse()
             return None
