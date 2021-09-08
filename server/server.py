@@ -180,7 +180,6 @@ class GameHand:
             self.hand_document['winnings'][player.queue_id] = 0
 
     def _deal(self):
-        self.send_state(None)
         self.last_action = None
         for p in list(self.players):
             if not p.chips and not p.amount_bet:
@@ -305,6 +304,7 @@ class GameHand:
             self.game.send_player(p_id, v)
 
     def deal_flop(self):
+        self.send_state(None)
         if len(self.players) == 2:
             self.players.reverse()
         self.timeout = 60
@@ -318,6 +318,7 @@ class GameHand:
         return players_actable[0] if len(players_actable) > 1 else None
 
     def deal_turn(self):
+        self.send_state(None)
         self._deal()
         self.turn1 = [self.deck.pop()]
         self.turn2 = [self.deck.pop()]
@@ -328,6 +329,7 @@ class GameHand:
         return players_actable[0] if len(players_actable) > 1 else None
 
     def deal_river(self):
+        self.send_state(None)
         self._deal()
         self.river = [self.deck.pop()]
         players_actable = [p for p in self.players if p.chips and not p.is_folded]
