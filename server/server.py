@@ -74,7 +74,6 @@ class Player:
         self.game = game
         self.nick = nick
         self.queue_id = queue_id
-        self.disconnected = True
         self.action_queue = queue.Queue()
 
     def deal(self, deck):
