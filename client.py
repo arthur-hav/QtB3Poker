@@ -752,7 +752,10 @@ class Game(QObject):
 
     def done(self):
         self.listener.stop()
-        self.connection.close()
+        try:
+            self.connection.close()
+        except pika.exceptions.AMQPError:
+            pass
         self.die.emit()
         self.listener_thread.quit()
         self.poker_timer_thread.quit()

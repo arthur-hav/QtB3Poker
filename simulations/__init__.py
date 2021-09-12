@@ -362,54 +362,53 @@ def average_rank():
             continue
         hands_gigaset.add(hand_str)
 
-    iter_dict = dict(elo_tourney.tourney)
     sims_gigadict = hands_rank_sim.sims_gigadict
     num_total = 0
     for k, lst in sims_gigadict.items():
         sims_gigadict[k] = Counter(lst)
         num_total = sum(sims_gigadict[k].values())
-    # for k in range(100):
-    #     for h1 in hands_gigaset:
-    #         for j in range(100):
-    #             c1 = cards_from_suit_group(h1)
-    #             d2 = Deck()
-    #             for card in c1:
-    #                 d2.remove_card(card)
-    #             d2.fisher_yates_shuffle_improved()
-    #             s = Simulation(d2)
-    #             rank_h1, _index = s.eval(c1)
-    #             sims_gigadict[h1][rank_h1] += 1
-    #     with open('hands_rank_sim.py', 'w') as f:
-    #         f.write(str({k: dict(v) for k, v in sims_gigadict.items()}))
+    for k in range(500):
+        for h1 in hands_gigaset:
+            for j in range(100):
+                c1 = cards_from_suit_group(h1)
+                d2 = Deck()
+                for card in c1:
+                    d2.remove_card(card)
+                d2.fisher_yates_shuffle_improved()
+                s = Simulation(d2)
+                rank_h1, _index = s.eval(c1)
+                sims_gigadict[h1][rank_h1] += 1
+        print(k)
+        with open('hands_rank_sim.py', 'w') as f:
+            f.write(str({k: dict(v) for k, v in sims_gigadict.items()}))
+
+
+def sim_elo(hands_gigaset, sims_gigadict, num_total):
+    iter_dict = dict(elo_tourney.tourney)
     for i in range(10000):
         for h1 in hands_gigaset:
-            total_adjust = 0
-            cards_h1 = cards_from_suit_group(h1)
-            deck = Deck()
-            for c in cards_h1:
-                deck.remove_card(c)
-            deck.fisher_yates_shuffle_improved()
-            h2 = suit_group_notation([deck.pop(), deck.pop(), deck.pop()], grouped=False)
-            ratio = compare_rank_counters(sims_gigadict[h1], sims_gigadict[h2], num_total)
-            elo_difference = iter_dict[h1] - iter_dict[h2]
-            if elo_difference > 0:
-                expected_wr = 1 - 0.5 ** (1 + elo_difference / 800)
-            else:
-                expected_wr = 0.5 ** (1 - elo_difference / 800)
-            if ratio > expected_wr:
-                adjust = 5 * (ratio - expected_wr)
-                if abs(elo_difference) < 100:
-                    adjust *= 1.5
-                iter_dict[h1] += adjust
-                iter_dict[h2] -= adjust
-                total_adjust += adjust
-            else:
-                adjust = 5 * (expected_wr - ratio)
-                if abs(elo_difference) < 100:
-                    adjust *= 1.5
-                iter_dict[h2] += adjust
-                iter_dict[h1] -= adjust
-                total_adjust -= adjust
+            for iteration in range(10):
+                cards_h1 = cards_from_suit_group(h1)
+                deck = Deck()
+                for c in cards_h1:
+                    deck.remove_card(c)
+                deck.fisher_yates_shuffle_improved()
+                h2 = suit_group_notation([deck.pop(), deck.pop(), deck.pop()], grouped=False)
+                ratio = compare_rank_counters(sims_gigadict[h1], sims_gigadict[h2], num_total)
+                elo_difference = iter_dict[h1] - iter_dict[h2]
+                if elo_difference > 0:
+                    expected_wr = 1 - 0.5 ** (1 + elo_difference / 800)
+                else:
+                    expected_wr = 0.5 ** (1 - elo_difference / 800)
+                likeliness = min(iter_dict[h2] / 1000, 1.0)
+                if ratio > expected_wr:
+                    adjust = 4 * (ratio - expected_wr) * likeliness
+                    iter_dict[h1] += adjust
+                    iter_dict[h2] -= adjust
+                else:
+                    adjust = 4 * (expected_wr - ratio) * likeliness
+                    iter_dict[h2] += adjust
+                    iter_dict[h1] -= adjust
         import pprint
         pprint.pprint(sorted([(k, iter_dict[k]) for k in hands_gigaset], key=lambda it: it[1]))
 
@@ -436,6 +435,42 @@ def average_rank():
         # print([hand_strs[n] for n in node_list])
         # hand_group_clusters[i] = f'{sum_avg}' + ', '.join(sorted(set(hand_strs[n] for n in node_list)))
 
+def cache_strength():
+    hands_gigaset = Counter()
+    d = Deck()
+
+    import strength_cache
+    rankings = [h[0] for h in strength_cache.rankings]
+    card_rankings = {}
+    for hand in itertools.combinations(d.cards, 3):
+        hand_str = suit_group_notation(hand, grouped=False)
+        hands_gigaset[hand_str] += 1
+    rank = 0
+    for hand_str in rankings:
+        rank += hands_gigaset[hand_str]
+        card_rankings[hand_str] = rank
+    sum_nb_hands = sum(hands_gigaset.values())
+    for k, v in card_rankings.items():
+        card_rankings[k] = v / sum_nb_hands
+    for hand_str, cardinal in hands_gigaset.items():
+        hands_gigaset[hand_str] = cardinal * (1 - card_rankings[hand_str] ** 2)
+
+    total_weight = sum(hands_gigaset.values())
+    sims_gigadict = hands_rank_sim.sims_gigadict
+    num_total = 0
+    for k, lst in sims_gigadict.items():
+        sims_gigadict[k] = Counter(lst)
+        num_total = sum(sims_gigadict[k].values())
+
+    strength_cache = Counter()
+    with open('out.py', 'a') as f:
+        for h1 in hands_gigaset.keys():
+            for h2, cardinal in hands_gigaset.items():
+                strength_cache[h1] += compare_rank_counters(sims_gigadict[h1], sims_gigadict[h2], num_total) * cardinal
+            f.write(f'("{h1}", {strength_cache[h1] / total_weight}),\n')
+            f.flush()
+
+
 if __name__ == '__main__':
-    average_rank()
+    cache_strength()
 

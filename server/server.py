@@ -18,6 +18,7 @@ from base64 import b64encode
 import redis
 import logging
 import yaml
+import random
 import importlib
 
 logger = logging.getLogger()
@@ -178,6 +179,57 @@ class GameHand:
             player.to_act = False
             self.hand_document['chips'][player.queue_id] = player.chips
             self.hand_document['winnings'][player.queue_id] = 0
+
+    def play(self):
+
+        to_act = self.deal_preflop()
+        next_hand = False
+        while to_act:
+            self.send_state(to_act)
+            to_act = self.act(to_act)
+            if self.check_all_folded():
+                next_hand = True
+                break
+        if next_hand:
+            return
+        to_act = self.deal_flop()
+        if not to_act:
+            self.send_state(None)
+            time.sleep(1)
+        while to_act:
+            self.send_state(to_act)
+            to_act = self.act(to_act)
+            if self.check_all_folded():
+                next_hand = True
+                break
+        if next_hand:
+            return
+        to_act = self.deal_turn()
+        if not to_act:
+            self.send_state(None)
+            time.sleep(1)
+        while to_act:
+            self.send_state(to_act)
+            to_act = self.act(to_act)
+            if self.check_all_folded():
+                next_hand = True
+                break
+        if next_hand:
+            return
+        to_act = self.deal_river()
+        if not to_act:
+            self.send_state(None)
+            time.sleep(1)
+        while to_act:
+            self.send_state(to_act)
+            to_act = self.act(to_act)
+            if self.check_all_folded():
+                next_hand = True
+                break
+        if next_hand:
+            return
+        self.showdown()
+        time.sleep(1)
 
     def _deal(self):
         self.last_action = None
@@ -393,10 +445,24 @@ class GameHand:
         self.mongo_db.insert_one(self.hand_document)
 
 
-class Game:
-    def __init__(self, players, code, credentials, game_config):
+class Table:
+    def __init__(self, players, code, credentials, game_config, stop_condition):
+        self.incoming_players = queue.Queue()
         r = redis.Redis()
+        rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
+        for p in players:
+            requests.put(f'http://localhost:15672/api/permissions/{self.code}/{p["_id"]}',
+                         auth=('admin', rabbitmq_admin_password),
+                         data=json.dumps({"configure": "$^",
+                                          "write": f'poker_exchange',
+                                          "read": f'public.{p["_id"]}'}))
+            requests.put(f'http://localhost:15672/api/topic-permissions/{self.code}/{p["_id"]}',
+                         auth=('admin', rabbitmq_admin_password),
+                         data=json.dumps({"exchange": "poker_exchange",
+                                          "write": f'game.{p["_id"]}',
+                                          "read": 'public'}))
         self.credentials = credentials
+        self.stop_condition = stop_condition
         self.players = [Player(self,
                                p['login'],
                                str(p['_id']),
@@ -448,15 +514,6 @@ class Game:
                                            routing_key='public',
                                            body=json.dumps(msg_dict).encode('utf-8'))
 
-    def game_start_send(self, credentials):
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, 'game_start',
-                                                                       credentials=credentials))
-        channel = connection.channel()
-        channel.exchange_declare(exchange='public', exchange_type='fanout')
-        channel.basic_publish(exchange='public',
-                              routing_key='public',
-                              body=json.dumps({'game': self.code,
-                                               'players': [p.queue_id for p in self.players]}).encode('utf-8'))
 
     def repeat(self, p_id):
         if self.last_msg_public:
@@ -483,98 +540,117 @@ class Game:
                                                   {'$set': {f'placements.{p.queue_id}': place}})
         self.players = new_players
 
+    def check_blind_augment(self):
+        now = datetime.datetime.utcnow()
+        elapsed_time = (now - self.blind_augment).total_seconds()
+        if elapsed_time > self.game_config['blind_timer']:
+            self.blind_augment = self.blind_augment + datetime.timedelta(seconds=self.game_config['blind_timer'])
+            avg_stack = sum(p.chips for p in self.players) / len(self.players)
+            self.broadcast({'log': 'Tournament chips decrease.'})
+            for player in self.players:
+                decrease = round(player.chips * self.game_config['blind_percent'] * 0.01 +
+                                 self.game_config['skim_percent'] * 0.01 * avg_stack)
+                player.chips = player.chips - decrease
+                if not player.disconnected:
+                    message = f'You were removed {decrease} chips'
+                    self.send_player(player.queue_id, {'log': message})
+
     def run(self):
-        nb_hands = 0
-        start_time = datetime.datetime.utcfromtimestamp(self.game_config.get('start_time', 0))
+        self.blind_augment = datetime.datetime.utcnow()
+        while not self.stop_condition(self):
+            inc_players = []
+            p = self.incoming_players.get(False)
+            while p:
+                inc_players.append(p)
+                p = self.incoming_players.get(False)
+            self.players.extend(inc_players)
+            self.check_blind_augment()
+            self.check_eliminated()
+            if self.stop_condition(self):
+                return
+            deck = Deck()
+            deck.fisher_yates_shuffle_improved()
+            hand = GameHand(self.players, self, deck, self.mongo_db, self.tourney_id)
+            hand.play()
+            self.check_eliminated()
+
+    def make_winner(self):
+        self.send_player(self.players[0].queue_id, {'log': 'You won the tournament!'})
+
+    def finish(self):
+        rabbitmq_admin_password = os.getenv('RABBITMQ_ADMIN_PASSWORD', 'unsafe_for_production')
+        requests.delete(f'http://localhost:15672/api/vhosts/{self.code}', auth=('admin', rabbitmq_admin_password))
+
+
+class Game:
+    def __init__(self, players, code, credentials, config):
+        self.players = players
+        self.code = code
+        self.credentials = credentials
+        self.config = config
+        self.tables = []
+
+    def game_start_send(self, credentials):
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, 'game_start',
+                                                                       credentials=credentials))
+        channel = connection.channel()
+        channel.exchange_declare(exchange='public', exchange_type='fanout')
+        channel.basic_publish(exchange='public',
+                              routing_key='public',
+                              body=json.dumps({'game': self.code,
+                                               'players': [p.queue_id for p in self.players]}).encode('utf-8'))
+
+    def wait_sitting_in(self):
+        start_time = datetime.datetime.utcfromtimestamp(self.config.get('start_time', 0))
         now = datetime.datetime.utcnow()
         while now < start_time:
             time.sleep(2)
-            self.connection.process_data_events()
             now = datetime.datetime.utcnow()
         r = redis.Redis()
         r.set(f'games.{self.code}.status', 'sitting in')
         self.game_start_send(self.credentials)
-        all_connect_timeout = self.game_config.get('all_connect_timeout', 30)
+        all_connect_timeout = self.config.get('all_connect_timeout', 30)
         while [p for p in self.players if p.disconnected]:
             time.sleep(2)
-            self.connection.process_data_events()
             all_connect_timeout -= 2
             if all_connect_timeout <= 0:
-                return
-        r.set(f'games.{self.code}.status', 'running')
-        self.blind_augment = datetime.datetime.utcnow()
-        while len(self.players) > 1:
-            nb_hands += 1
-            deck = Deck()
-            deck.fisher_yates_shuffle_improved()
-            now = datetime.datetime.utcnow()
-            elapsed_time = (now - self.blind_augment).total_seconds()
-            if elapsed_time > self.game_config['blind_timer']:
-                self.blind_augment = self.blind_augment + datetime.timedelta(seconds=self.game_config['blind_timer'])
-                avg_stack = sum(p.chips for p in self.players) / len(self.players)
-                self.broadcast({'log': 'Tournament chips decrease.'})
-                for player in self.players:
-                    decrease = round(player.chips * self.game_config['blind_percent'] * 0.01 +
-                                     self.game_config['skim_percent'] * 0.01 * avg_stack)
-                    player.chips = player.chips - decrease
-                    if not player.disconnected:
-                        message = f'You were removed {decrease} chips'
-                        self.send_player(player.queue_id, {'log': message})
-            self.check_eliminated()
-            hand = GameHand(self.players, self, deck, self.mongo_db, self.tourney_id)
-            if len(self.players) <= 1:
-                break
-            to_act = hand.deal_preflop()
-            next_hand = False
-            while to_act:
-                hand.send_state(to_act)
-                to_act = hand.act(to_act)
-                if hand.check_all_folded():
-                    next_hand = True
+                return False
+        return True
+
+    def stop_condition(self, table):
+        if len([t.players for t in self.tables]) <= 1:
+            table.make_winner()
+            return True
+        if sum(self.config['nb_seat'] - len(t.players) for t in table) >= len(table.players):
+            self.dispatch(table)
+            return True
+        return False
+
+    def dispatch(self, table):
+        for player in table.players:
+            for other_table in self.tables:
+                if other_table == table:
+                    continue
+                if len(other_table.players) < self.config['nb_seats']:
+                    other_table.incomming_players.put(player)
                     break
-            if next_hand:
-                continue
-            to_act = hand.deal_flop()
-            if not to_act:
-                hand.send_state(None)
-                time.sleep(1)
-            while to_act:
-                hand.send_state(to_act)
-                to_act = hand.act(to_act)
-                if hand.check_all_folded():
-                    next_hand = True
-                    break
-            if next_hand:
-                continue
-            to_act = hand.deal_turn()
-            if not to_act:
-                hand.send_state(None)
-                time.sleep(1)
-            while to_act:
-                hand.send_state(to_act)
-                to_act = hand.act(to_act)
-                if hand.check_all_folded():
-                    next_hand = True
-                    break
-            if next_hand:
-                continue
-            to_act = hand.deal_river()
-            if not to_act:
-                hand.send_state(None)
-                time.sleep(1)
-            while to_act:
-                hand.send_state(to_act)
-                to_act = hand.act(to_act)
-                if hand.check_all_folded():
-                    next_hand = True
-                    break
-            if next_hand:
-                continue
-            hand.showdown()
-            time.sleep(1)
-            self.check_eliminated()
-        if self.players:
-            self.send_player(self.players[0].queue_id, {'log': 'You won the tournament!'})
+        table.finish()
+        self.tables.remove(table)
+
+    def run(self):
+        table_threads = []
+        for i in range(len(self.players), step=self.config['nb_seats']):
+            players_on_table = self.players[i:i+self.config['nb_seats']]
+            table = Table(players_on_table, self.code + f'-t-{i}', self.credentials, self.config, self.stop_condition)
+            thread = threading.Thread(target=table.run)
+            thread.start()
+            self.tables.append(table)
+        for thread in table_threads:
+            thread.join()
+
+    def finish(self):
+        for table in self.tables:
+            table.finish()
 
 
 class SeatingListener:
@@ -595,27 +671,18 @@ class SeatingListener:
                      auth=('admin', rabbitmq_admin_password),
                      data=json.dumps({"configure": ".*", "write": '.*', "read": '.*'}))
 
-        for p in players:
-            requests.put(f'http://localhost:15672/api/permissions/{self.code}/{p["_id"]}',
-                         auth=('admin', rabbitmq_admin_password),
-                         data=json.dumps({"configure": "$^",
-                                          "write": f'poker_exchange',
-                                          "read": f'public.{p["_id"]}'}))
-            requests.put(f'http://localhost:15672/api/topic-permissions/{self.code}/{p["_id"]}',
-                         auth=('admin', rabbitmq_admin_password),
-                         data=json.dumps({"exchange": "poker_exchange",
-                                          "write": f'game.{p["_id"]}',
-                                          "read": 'public'}))
-
         credentials = pika.PlainCredentials('admin', rabbitmq_admin_password)
 
         try:
             g = Game(players, self.code, credentials, self.game_config)
-            g.run()
+            if g.wait_sitting_in():
+                r = redis.Redis()
+                r.set(f'games.{self.code}.status', 'running')
+                g.run()
         finally:
             r = redis.Redis()
             r.hdel('games.start', self.code)
             if 'plugin' in self.game_config:
                 m = importlib.import_module('server.plugins.' + self.game_config['plugin'])
                 m.post_game_hook(self.code)
-            requests.delete(f'http://localhost:15672/api/vhosts/{self.code}', auth=('admin', rabbitmq_admin_password))
+            g.finish()
