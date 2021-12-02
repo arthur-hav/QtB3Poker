@@ -131,3 +131,4 @@ dmypy.json
 
 # Specific to qtb3poker
 conf.yml
+server/plugins/
